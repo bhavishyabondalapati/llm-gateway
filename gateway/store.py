@@ -162,11 +162,16 @@ class Store:
                 g["cost_usd"] = round(g["cost_usd"], 6)
             return sorted(out.values(), key=lambda g: -g["requests"])
 
-        # Per-minute time series
+        # Time series with a bucket size that suits the window; empty buckets are kept
+        # (as zeros) so charts show gaps in traffic honestly.
+        step = 60 if window_seconds <= 3600 else 900 if window_seconds <= 86400 else 7200
+        now = time.time()
         buckets: dict[int, dict] = {}
+        for ts in range(int(since // step * step), int(now // step * step) + 1, step):
+            buckets[ts] = {"requests": 0, "cost_usd": 0.0, "cache_hits": 0, "redactions": 0, "errors": 0, "_lat": []}
         for r in rows:
-            b = buckets.setdefault(int(r["ts"] // 60 * 60), {"requests": 0, "cost_usd": 0.0, "cache_hits": 0,
-                                                             "redactions": 0, "errors": 0, "_lat": []})
+            b = buckets.setdefault(int(r["ts"] // step * step), {"requests": 0, "cost_usd": 0.0, "cache_hits": 0,
+                                                                 "redactions": 0, "errors": 0, "_lat": []})
             b["requests"] += 1
             b["cost_usd"] += r["cost_usd"]
             b["cache_hits"] += r["cache"] in ("exact", "semantic")
@@ -179,11 +184,12 @@ class Store:
             b = buckets[ts]
             lat = b.pop("_lat")
             series.append({"ts": ts, **b, "cost_usd": round(b["cost_usd"], 6),
-                           "p50_latency_ms": round(percentile(lat, 50), 1),
-                           "p95_latency_ms": round(percentile(lat, 95), 1)})
+                           "p50_latency_ms": round(percentile(lat, 50), 1) if lat else None,
+                           "p95_latency_ms": round(percentile(lat, 95), 1) if lat else None})
 
         return {
             "window_seconds": window_seconds,
+            "bucket_seconds": step,
             "totals": {
                 "requests": len(rows),
                 "errors": len(rows) - len(ok),

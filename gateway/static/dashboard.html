@@ -104,19 +104,19 @@
   <section class="grid2">
     <div class="card">
       <h2>Latency</h2>
-      <div class="desc">Per-minute p50 and p95, successful requests (ms)</div>
+      <div class="desc">p50 and p95 <span class="bucket">per minute</span>, successful requests (ms)</div>
       <div class="legend"><span><span class="key line" style="background:var(--series-1)"></span>p50</span><span><span class="key line" style="background:var(--series-2)"></span>p95</span></div>
       <div id="latency"></div>
     </div>
     <div class="card">
       <h2>Requests and cache hits</h2>
-      <div class="desc">Requests per minute, split by whether the cache answered</div>
+      <div class="desc">Requests <span class="bucket">per minute</span>, split by whether the cache answered</div>
       <div class="legend"><span><span class="key" style="background:var(--series-1)"></span>Cache hit</span><span><span class="key" style="background:var(--series-2)"></span>Sent to provider</span></div>
       <div id="requests"></div>
     </div>
     <div class="card">
       <h2>Cost</h2>
-      <div class="desc">Provider spend per minute (USD)</div>
+      <div class="desc">Provider spend <span class="bucket">per minute</span> (USD)</div>
       <div id="cost"></div>
     </div>
     <div class="card">
@@ -159,7 +159,11 @@
   const usd = (n) => n === 0 ? "$0" : n < 0.01 ? "$" + n.toFixed(5) : "$" + n.toFixed(n < 10 ? 4 : 2);
   const ms = (n) => n >= 1000 ? (n / 1000).toFixed(2) + " s" : Math.round(n) + " ms";
   const pct = (n) => (n * 100).toFixed(1) + "%";
-  const hhmm = (ts) => new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  let bucketSec = 60;
+  const hhmm = (ts) => bucketSec >= 7200
+    ? new Date(ts * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit" })
+    : new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const bucketLabel = (s) => s === 60 ? "per minute" : s === 900 ? "per 15 minutes" : `per ${s / 3600} hours`;
   const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
   // ---------- tooltip ----------
@@ -221,25 +225,35 @@
   function empty(target, msg = "No data in this window yet") { target.innerHTML = `<div class="empty">${msg}</div>`; }
 
   function lineChart(target, series) {
-    if (!series.length) return empty(target);
-    const yMax = niceMax(Math.max(...series.map((s) => s.p95_latency_ms), 1));
+    if (!series.some((s) => s.p95_latency_ms !== null)) return empty(target);
+    const yMax = niceMax(Math.max(...series.map((s) => s.p95_latency_ms || 0), 1));
     const svg = frame(target, yMax, (v) => ms(v), series);
     const ih = H - M.t - M.b;
     const yOf = (v) => M.t + ih - (ih * v) / yMax;
     const n = series.length;
     const lines = [["p50_latency_ms", "var(--series-1)", "p50"], ["p95_latency_ms", "var(--series-2)", "p95"]];
     for (const [k, color, label] of lines) {
-      const d = series.map((s, i) => `${i ? "L" : "M"}${xAt(i, n)},${yOf(s[k])}`).join("");
+      // Break the line at empty buckets instead of drawing through them.
+      let d = "", pen = false;
+      series.forEach((s, i) => {
+        if (s[k] === null) { pen = false; return; }
+        d += `${pen ? "L" : "M"}${xAt(i, n)},${yOf(s[k])}`; pen = true;
+      });
       el("path", { d, fill: "none", stroke: color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }, svg);
-      const last = series[n - 1];
-      el("circle", { cx: xAt(n - 1, n), cy: yOf(last[k]), r: 4, fill: color, stroke: "var(--surface-1)", "stroke-width": 2 }, svg);
+      // isolated points (no neighbours) would be invisible as a path, so give them a dot
+      series.forEach((s, i) => {
+        const prev = series[i - 1], next = series[i + 1];
+        if (s[k] !== null && (!prev || prev[k] === null) && (!next || next[k] === null))
+          el("circle", { cx: xAt(i, n), cy: yOf(s[k]), r: 4, fill: color, stroke: "var(--surface-1)", "stroke-width": 2 }, svg);
+      });
     }
-    // direct end labels, only when they don't collide
-    const last = series[n - 1];
+    // direct end labels on the latest non-empty bucket, only when they don't collide
+    const lastIdx = series.map((s) => s.p50_latency_ms !== null).lastIndexOf(true);
+    const last = series[lastIdx];
     const y50 = yOf(last.p50_latency_ms), y95 = yOf(last.p95_latency_ms);
     if (Math.abs(y50 - y95) > 13) {
-      el("text", { x: W - M.r + 8, y: y95 + 4 }, svg).textContent = "p95";
-      el("text", { x: W - M.r + 8, y: y50 + 4 }, svg).textContent = "p50";
+      el("text", { x: xAt(lastIdx, n) + 8, y: y95 + 4 }, svg).textContent = "p95";
+      el("text", { x: xAt(lastIdx, n) + 8, y: y50 + 4 }, svg).textContent = "p50";
     }
     // crosshair + tooltip
     const cross = el("line", { y1: M.t, y2: M.t + ih, stroke: "var(--text-muted)", "stroke-width": 1, visibility: "hidden" }, svg);
@@ -250,13 +264,14 @@
       const i = Math.max(0, Math.min(n - 1, Math.round(((p.x - M.l) / (W - M.l - M.r)) * (n - 1))));
       const s = series[i];
       cross.setAttribute("x1", xAt(i, n)); cross.setAttribute("x2", xAt(i, n)); cross.setAttribute("visibility", "visible");
-      showTip(`<b>${hhmm(s.ts)}</b><br>p50 ${ms(s.p50_latency_ms)}<br>p95 ${ms(s.p95_latency_ms)}<br>${nf.format(s.requests)} requests`, ev);
+      showTip(s.p50_latency_ms === null ? `<b>${hhmm(s.ts)}</b><br>No successful requests`
+        : `<b>${hhmm(s.ts)}</b><br>p50 ${ms(s.p50_latency_ms)}<br>p95 ${ms(s.p95_latency_ms)}<br>${nf.format(s.requests)} requests`, ev);
     });
     hit.addEventListener("mouseleave", () => { cross.setAttribute("visibility", "hidden"); hideTip(); });
   }
 
   function columnChart(target, series, stacks, fmtY, tipFn) {
-    if (!series.length) return empty(target);
+    if (!series.some((s) => s.requests > 0)) return empty(target);
     const totals = series.map((s) => stacks.reduce((a, [k]) => a + s[k], 0));
     const yMax = niceMax(Math.max(...totals, 0) || 1);
     const svg = frame(target, yMax, fmtY, series);
@@ -313,6 +328,8 @@
   // ---------- render ----------
   function render(d) {
     const t = d.totals;
+    bucketSec = d.bucket_seconds;
+    for (const b of document.querySelectorAll(".bucket")) b.textContent = bucketLabel(bucketSec);
     const tile = (label, value, note = "", hero = false) =>
       `<div class="tile${hero ? " hero" : ""}"><div class="label">${label}</div><div class="value">${value}</div><div class="note">${note}</div></div>`;
     $("tiles").innerHTML = [
