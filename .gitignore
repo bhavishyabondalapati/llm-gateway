@@ -1,0 +1,15 @@
+# secrets
+.env
+# python
+venv/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+# data
+data/
+*.db
+*.sqlite3
+# os
+.DS_Store

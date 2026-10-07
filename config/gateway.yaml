@@ -1,0 +1,64 @@
+# LLM Gateway configuration.
+# Only SHA-256 hashes of team keys live here, so this file is safe to commit.
+# Make a new key with:  python scripts/hash_key.py --new
+#
+# Demo keys (for local use only): gw-demo-alpha, gw-demo-beta, gw-demo-tiny
+
+teams:
+  - name: alpha
+    api_key_sha256: da85c4038e2e5f3aebd384ca231eb74e2ab5a472a932b17ab5c307cfa552b6ce   # gw-demo-alpha
+    requests_per_minute: 600
+    monthly_token_budget: 5000000
+  - name: beta
+    api_key_sha256: 083bd6627524ff4ab186a1d5681eeeb91e67847f20283c8d7add150223dad852   # gw-demo-beta
+    requests_per_minute: 60
+    monthly_token_budget: 1000000
+  - name: tiny  # small limits, to demo rate limiting and budgets
+    api_key_sha256: d8c3933e8873279365a5baedf1eaf64ca8ac713dcd4d69f6273b9f9760f443d8   # gw-demo-tiny
+    requests_per_minute: 5
+    monthly_token_budget: 500
+
+providers:
+  # Real providers are enabled only when their API key env var is set (see .env.example).
+  openai:
+    type: openai
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+  anthropic:
+    type: anthropic
+    api_key_env: ANTHROPIC_API_KEY
+  # Fake providers always work, offline.
+  fake-primary:
+    type: fake
+    latency_ms: 40
+  fake-backup:
+    type: fake
+    latency_ms: 80
+  fake-flaky:
+    type: fake
+    latency_ms: 30
+    failure_rate: 0.5
+
+# Requested model name -> ordered fallback chain. Disabled providers are skipped.
+models:
+  gpt-4o-mini:
+    targets:
+      - {provider: openai}
+      - {provider: fake-primary}
+      - {provider: fake-backup}
+  claude-haiku-4-5:
+    targets:
+      - {provider: anthropic}
+      - {provider: fake-primary}
+      - {provider: fake-backup}
+  flaky-model:  # 50% failure on the first provider: shows retries + fallback
+    targets:
+      - {provider: fake-flaky}
+      - {provider: fake-backup}
+
+# USD per 1M tokens. Example prices; check the provider's pricing page before relying on them.
+pricing:
+  gpt-4o-mini: {input_per_million: 0.15, output_per_million: 0.60}
+  claude-haiku-4-5: {input_per_million: 1.00, output_per_million: 5.00}
+  flaky-model: {input_per_million: 0.50, output_per_million: 1.50}
+default_price: {input_per_million: 1.00, output_per_million: 2.00}

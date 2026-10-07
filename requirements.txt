@@ -1,0 +1,25 @@
+# Web server
+fastapi==0.142.2
+uvicorn[standard]==0.54.0
+httpx==0.28.1
+pydantic==2.13.5
+pydantic-settings==2.15.0
+python-dotenv==1.2.4
+PyYAML==6.0.3
+
+# PII redaction
+presidio-analyzer==2.2.364
+spacy==3.8.16
+en_core_web_md @ https://github.com/explosion/spacy-models/releases/download/en_core_web_md-3.8.0/en_core_web_md-3.8.0-py3-none-any.whl
+
+# Semantic cache
+numpy==2.4.6
+
+# Tracing
+opentelemetry-api==1.45.1
+opentelemetry-sdk==1.45.1
+opentelemetry-exporter-otlp-proto-http==1.45.1
+
+# Tests
+pytest==9.1.1
+pytest-asyncio==1.4.0
