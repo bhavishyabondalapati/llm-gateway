@@ -86,6 +86,7 @@ class Store:
         self.conn = sqlite3.connect(path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA synchronous=NORMAL")  # safe with WAL; avoids an fsync per commit
         self.conn.executescript(SCHEMA)
         self.lock = threading.Lock()
         # team -> (month_start, tokens used). Avoids a SUM query on every request.
