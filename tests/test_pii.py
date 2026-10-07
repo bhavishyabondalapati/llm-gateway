@@ -77,3 +77,10 @@ def test_stream_restorer_does_not_hold_back_forever():
     r = StreamRestorer({"<PERSON_1>": "Ann"})
     first = r.feed("a < b and then a lot of ordinary text follows without closing")
     assert first.startswith("a < b")  # released once longer than any placeholder
+
+
+def test_repeated_text_uses_memo_without_storing_text(redactor):
+    text = "Memo check: contact Olivia Brown at olivia@example.com"
+    first = redactor.find_spans(text)
+    assert redactor.find_spans(text) == first
+    assert not any(text in str(k) or text in str(v) for k, v in redactor._memo.items())

@@ -14,9 +14,10 @@ consistent across every message in the conversation.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import threading
-from collections import Counter
+from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
 
 from gateway.schemas import ChatMessage
@@ -65,12 +66,18 @@ class PIIRedactor:
         entities: list[str] | None = None,
         score_threshold: float = 0.4,
         spacy_model: str = "en_core_web_md",
+        memo_size: int = 10_000,
     ):
         self.entities = entities or DEFAULT_ENTITIES
         self.score_threshold = score_threshold
         self.spacy_model = spacy_model
         self._analyzer = None
         self._lock = threading.Lock()  # spaCy pipelines aren't guaranteed thread-safe
+        # Memo of analysis results: sha256(text) -> spans. Repeated prompts and chat
+        # history (re-sent every turn) skip Presidio. Only hashes and offsets are kept,
+        # never the text itself.
+        self._memo: OrderedDict[str, list[tuple[int, int, str]]] = OrderedDict()
+        self._memo_size = memo_size
 
     @property
     def analyzer(self):
@@ -92,7 +99,11 @@ class PIIRedactor:
         """Return non-overlapping (start, end, entity_type) spans, sorted by start."""
         if not text.strip():
             return []
+        digest = hashlib.sha256(text.encode()).hexdigest()
         with self._lock:
+            if digest in self._memo:
+                self._memo.move_to_end(digest)
+                return self._memo[digest]
             results = self.analyzer.analyze(
                 text=text,
                 language="en",
@@ -107,7 +118,12 @@ class PIIRedactor:
                 continue
             if all(r.end <= s or r.start >= e for s, e, _ in chosen):
                 chosen.append((r.start, r.end, r.entity_type))
-        return sorted(chosen)
+        chosen.sort()
+        with self._lock:
+            self._memo[digest] = chosen
+            if len(self._memo) > self._memo_size:
+                self._memo.popitem(last=False)
+        return chosen
 
     def redact_messages(self, messages: list[ChatMessage]) -> RedactionResult:
         mapping: dict[str, str] = {}
