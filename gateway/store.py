@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS requests (
     cost_usd REAL NOT NULL DEFAULT 0,
     saved_usd REAL NOT NULL DEFAULT 0,    -- estimated cost avoided by a cache hit
     latency_ms REAL NOT NULL,
-    cache TEXT NOT NULL DEFAULT 'miss',   -- miss | exact | semantic | bypass
+    cache TEXT NOT NULL DEFAULT 'none',   -- none (rejected before lookup) | miss | exact | semantic | bypass
     redactions INTEGER NOT NULL DEFAULT 0,
     attempts INTEGER NOT NULL DEFAULT 0,
     stream INTEGER NOT NULL DEFAULT 0,
@@ -57,7 +57,7 @@ class RequestRecord:
     completion_tokens: int = 0
     cost_usd: float = 0.0
     saved_usd: float = 0.0
-    cache: str = "miss"
+    cache: str = "none"
     attempts: int = 0
     stream: bool = False
     error: str | None = None

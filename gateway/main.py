@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from opentelemetry import context, trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SpanExporter
@@ -120,6 +120,10 @@ def create_app(
     @app.exception_handler(RequestValidationError)
     async def validation_error(_: Request, exc: RequestValidationError):
         return error_response(400, str(exc.errors()), "invalid_request_error")
+
+    @app.get("/", include_in_schema=False)
+    async def root():
+        return RedirectResponse("/dashboard")
 
     @app.get("/healthz")
     async def healthz():

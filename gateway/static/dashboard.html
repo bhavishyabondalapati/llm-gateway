@@ -188,7 +188,7 @@
   const niceMax = (v) => {
     if (v <= 0) return 1;
     const p = Math.pow(10, Math.floor(Math.log10(v)));
-    for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= v) return m * p;
+    for (const m of [1, 2, 4, 6, 8, 10]) if (m * p >= v) return m * p;  // all divide cleanly into 4 ticks
     return 10 * p;
   };
   // Column with 4px rounded top, square at baseline.
@@ -345,7 +345,7 @@
     columnChart($("requests"), d.series.map((s) => ({ ...s, miss: s.requests - s.cache_hits })),
       [["cache_hits", "var(--series-1)"], ["miss", "var(--series-2)"]], (v) => compact(v),
       (s) => `<b>${hhmm(s.ts)}</b><br>${nf.format(s.requests)} requests<br>${nf.format(s.cache_hits)} cache hits<br>${nf.format(s.errors)} errors`);
-    columnChart($("cost"), d.series, [["cost_usd", "var(--series-1)"]], (v) => usd(v),
+    columnChart($("cost"), d.series, [["cost_usd", "var(--series-1)"]], (v) => v === 0 ? "$0" : "$" + +v.toPrecision(2),
       (s) => `<b>${hhmm(s.ts)}</b><br>${usd(s.cost_usd)}`);
     barList($("entities"), d.redactions_by_entity);
 
@@ -372,7 +372,7 @@
       { label: "Model", fmt: (r) => esc(r.model) },
       { label: "Provider", fmt: (r) => esc(r.provider || "-") },
       { label: "Status", fmt: (r) => r.status === 200 ? "200" : `<span class="err">${r.status}</span>` },
-      { label: "Cache", fmt: (r) => `<span class="badge">${esc(r.cache)}</span>` },
+      { label: "Cache", fmt: (r) => r.cache === "none" ? "-" : `<span class="badge">${esc(r.cache)}</span>` },
       { label: "Latency", num: true, fmt: (r) => ms(r.latency_ms) },
       { label: "Tokens", num: true, fmt: (r) => nf.format(r.prompt_tokens + r.completion_tokens) },
       { label: "Cost", num: true, fmt: (r) => usd(r.cost_usd) },
