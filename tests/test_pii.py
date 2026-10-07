@@ -41,6 +41,14 @@ def test_text_without_pii_is_unchanged(redactor):
     assert res.messages[0].content == text and res.total == 0
 
 
+@pytest.mark.parametrize("text", [
+    "Give me one fact about the number 4 and 0.266331.",
+    "The ratio was 0.760948 in 2023.",
+])
+def test_decimals_are_not_phone_numbers(redactor, text):
+    assert redactor.redact_messages([msg(text)]).total == 0
+
+
 def test_content_parts_are_redacted(redactor):
     res = redactor.redact_messages([msg([{"type": "text", "text": "Contact bob@example.com"}])])
     assert res.messages[0].content[0]["text"] == "Contact <EMAIL_ADDRESS_1>"

@@ -32,6 +32,18 @@ DEFAULT_ENTITIES = [
     "LOCATION",
 ]
 
+_DECIMAL_RE = re.compile(r"^[+-]?\d*\.\d+$")
+
+
+def plausible(entity_type: str, text: str) -> bool:
+    """Cheap sanity checks that remove common Presidio false positives."""
+    if entity_type in ("PERSON", "LOCATION"):
+        return any(c.isalpha() for c in text)  # spaCy sometimes tags bare numbers
+    if entity_type == "PHONE_NUMBER":
+        return not _DECIMAL_RE.match(text.strip()) and sum(c.isdigit() for c in text) >= 7
+    return True
+
+
 PLACEHOLDER_RE = re.compile(r"<([A-Z_]+_\d+)>")
 MAX_PLACEHOLDER_LEN = 32  # longest placeholder we might need to buffer while streaming
 
@@ -91,6 +103,8 @@ class PIIRedactor:
         results = sorted(results, key=lambda r: (-r.score, -(r.end - r.start)))
         chosen: list[tuple[int, int, str]] = []
         for r in results:
+            if not plausible(r.entity_type, text[r.start : r.end]):
+                continue
             if all(r.end <= s or r.start >= e for s, e, _ in chosen):
                 chosen.append((r.start, r.end, r.entity_type))
         return sorted(chosen)
