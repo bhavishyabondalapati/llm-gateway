@@ -215,7 +215,7 @@ async def handle_chat(state: GatewayState, request: Request, body: ChatCompletio
         redaction = RedactionResult(messages=body.messages)
         if state.redactor is not None:
             with state.tracer.start_as_current_span("pii.redact") as span:
-                redaction = await asyncio.to_thread(state.redactor.redact_messages, body.messages)
+                redaction = await state.redactor.aredact(body.messages)
                 span.set_attribute("gateway.pii.redactions", redaction.total)
                 for etype, n in redaction.counts.items():
                     span.set_attribute(f"gateway.pii.{etype.lower()}", n)

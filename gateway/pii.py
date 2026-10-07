@@ -14,10 +14,12 @@ consistent across every message in the conversation.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import re
 import threading
 from collections import Counter, OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from gateway.schemas import ChatMessage
@@ -73,10 +75,15 @@ class PIIRedactor:
         self.spacy_model = spacy_model
         self._analyzer = None
         self._lock = threading.Lock()  # spaCy pipelines aren't guaranteed thread-safe
+        # Presidio is CPU-bound and runs one call at a time anyway, so it gets its own
+        # single thread. Sharing asyncio's default pool let queued Presidio calls
+        # starve other work (e.g. SQLite writes) that also uses that pool.
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="presidio")
         # Memo of analysis results: sha256(text) -> spans. Repeated prompts and chat
         # history (re-sent every turn) skip Presidio. Only hashes and offsets are kept,
-        # never the text itself.
+        # never the text itself. Separate lock so memo hits never wait on an analysis.
         self._memo: OrderedDict[str, list[tuple[int, int, str]]] = OrderedDict()
+        self._memo_lock = threading.Lock()
         self._memo_size = memo_size
 
     @property
@@ -99,11 +106,12 @@ class PIIRedactor:
         """Return non-overlapping (start, end, entity_type) spans, sorted by start."""
         if not text.strip():
             return []
-        digest = hashlib.sha256(text.encode()).hexdigest()
-        with self._lock:
+        digest = _digest(text)
+        with self._memo_lock:
             if digest in self._memo:
                 self._memo.move_to_end(digest)
                 return self._memo[digest]
+        with self._lock:
             results = self.analyzer.analyze(
                 text=text,
                 language="en",
@@ -119,11 +127,21 @@ class PIIRedactor:
             if all(r.end <= s or r.start >= e for s, e, _ in chosen):
                 chosen.append((r.start, r.end, r.entity_type))
         chosen.sort()
-        with self._lock:
+        with self._memo_lock:
             self._memo[digest] = chosen
             if len(self._memo) > self._memo_size:
                 self._memo.popitem(last=False)
         return chosen
+
+    def is_memoized(self, messages: list[ChatMessage]) -> bool:
+        with self._memo_lock:
+            return all(_digest(t) in self._memo for t in _texts(messages) if t.strip())
+
+    async def aredact(self, messages: list[ChatMessage]) -> RedactionResult:
+        """Async redaction: inline if every text is memoized (microseconds), else on the Presidio thread."""
+        if self.is_memoized(messages):
+            return self.redact_messages(messages)
+        return await asyncio.get_running_loop().run_in_executor(self._executor, self.redact_messages, messages)
 
     def redact_messages(self, messages: list[ChatMessage]) -> RedactionResult:
         mapping: dict[str, str] = {}
@@ -159,6 +177,20 @@ class PIIRedactor:
                         part["text"] = redact_text(part["text"])
             new_messages.append(m)
         return RedactionResult(messages=new_messages, mapping=mapping, counts=counts)
+
+
+def _digest(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _texts(messages: list[ChatMessage]):
+    for m in messages:
+        if isinstance(m.content, str):
+            yield m.content
+        elif isinstance(m.content, list):
+            for part in m.content:
+                if part.get("type") == "text" and isinstance(part.get("text"), str):
+                    yield part["text"]
 
 
 def restore(text: str, mapping: dict[str, str]) -> str:

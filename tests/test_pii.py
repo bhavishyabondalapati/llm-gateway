@@ -84,3 +84,12 @@ def test_repeated_text_uses_memo_without_storing_text(redactor):
     first = redactor.find_spans(text)
     assert redactor.find_spans(text) == first
     assert not any(text in str(k) or text in str(v) for k, v in redactor._memo.items())
+
+
+async def test_async_redaction_matches_sync(redactor):
+    msgs = [msg("Async check for Ahmed Hassan, ahmed@example.com")]
+    first = await redactor.aredact(msgs)  # analysed on the Presidio thread
+    assert redactor.is_memoized(msgs)
+    second = await redactor.aredact(msgs)  # served inline from the memo
+    assert first.messages[0].content == second.messages[0].content
+    assert first.mapping == second.mapping
