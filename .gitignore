@@ -13,3 +13,6 @@ data/
 *.sqlite3
 # os
 .DS_Store
+
+# local tooling
+.claude/

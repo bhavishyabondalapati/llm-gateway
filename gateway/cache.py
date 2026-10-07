@@ -62,7 +62,7 @@ class ResponseCache:
         embedder: Embedder | None,
         ttl_seconds: int = 3600,
         max_entries: int = 10_000,
-        semantic_threshold: float = 0.95,
+        semantic_threshold: float = 0.96,
     ):
         self.embedder = embedder
         self.ttl = ttl_seconds

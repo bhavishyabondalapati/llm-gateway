@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     cache_ttl_seconds: int = 3600
     cache_max_entries: int = 10_000
     semantic_cache_enabled: bool = True
-    semantic_cache_threshold: float = 0.95
+    semantic_cache_threshold: float = 0.96
 
     # Provider calls
     provider_timeout_seconds: float = 30.0
