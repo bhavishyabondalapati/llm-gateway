@@ -24,6 +24,11 @@ learnings are folded into the relevant section rather than appended.
   right exception classes. FastAPI's default 422 is converted to 400.
 - **Streaming** (`stream: true`) is supported, including
   `stream_options.include_usage`, because most chat UIs stream.
+- **Checked with the official `openai` Python SDK** against the running
+  server: completions, streaming with `include_usage`, `models.list()`, and
+  error mapping (`NotFoundError`, `RateLimitError` with
+  `rate_limit_exceeded`). It isn't in the automated tests to keep the
+  `openai` package out of the dependencies.
 - Gateway metadata goes in **response headers** (`x-gateway-cache`,
   `x-gateway-provider`, `x-gateway-cost-usd`, `x-gateway-redactions`,
   `x-ratelimit-*`) so the response body stays exactly OpenAI-shaped.
@@ -54,9 +59,16 @@ learnings are folded into the relevant section rather than appended.
   chars) so a placeholder split across chunks (`<PER` + `SON_1>`) is still
   restored. A literal `<` in normal text is released as soon as it's clearly
   not a placeholder.
-- Redaction runs in a **thread** (`asyncio.to_thread`) behind a lock, because
-  spaCy is CPU-bound and not guaranteed thread-safe. This makes PII the main
-  per-process throughput limit (see benchmarks); scale with more uvicorn workers.
+- Redaction runs on a **dedicated single Presidio thread**, because spaCy is
+  CPU-bound and not guaranteed thread-safe. The first version used
+  `asyncio.to_thread` (the shared default pool) plus a lock: queued Presidio
+  calls filled the pool, and memo lookups waited on the same lock. The result was
+  that cache hits took ~180 ms under load. Now memo lookups have their own lock,
+  and requests whose texts are all memoized are redacted inline on the event
+  loop (microseconds). Hit p50 dropped to ~2 ms.
+- Presidio is still the **main per-process throughput limit** (~5 ms of CPU
+  per new message). Scale with more uvicorn workers (one Presidio thread
+  each); the GIL makes more threads per process pointless.
 - **Presidio results are memoized** by SHA-256 of the message text (10k
   entries, LRU). The first benchmark showed cache hits barely improved
   throughput because every request, hit or not, still paid for Presidio.

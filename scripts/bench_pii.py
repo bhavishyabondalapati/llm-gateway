@@ -19,7 +19,7 @@ FILLER = "The quarterly numbers look good and the team is on track for the launc
 
 
 def main():
-    r = PIIRedactor()
+    r = PIIRedactor(memo_size=0)  # measure real Presidio work, not memo hits
     t0 = time.perf_counter()
     r.analyzer  # noqa: B018
     print(f"model load: {time.perf_counter() - t0:.1f} s\n")
