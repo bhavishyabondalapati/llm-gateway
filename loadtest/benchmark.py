@@ -98,13 +98,14 @@ def main():
         f"{n} requests per scenario, concurrency {args.concurrency} spread over {args.processes} load-generator "
         f"processes on the same machine.",
         "",
-        "| Scenario | Throughput (req/s) | p50 ms | p95 ms | p99 ms | Success | Cache hits |",
-        "|---|---:|---:|---:|---:|---:|---:|",
+        "| Scenario | Throughput (req/s) | p50 ms | p95 ms | p99 ms | Success | Cache hits | p50 hit / miss ms |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for name, _, r, hits in rows:
         lat = r["latency_ms"]
         lines.append(f"| {name} | {r['throughput_rps']} | {lat[50]} | {lat[95]} | {lat[99]} | "
-                     f"{r['success_rate']:.1%} | {hits / r['requests']:.0%} |")
+                     f"{r['success_rate']:.1%} | {hits / r['requests']:.0%} | "
+                     + (f"{r['p50_ms_cache_hit']} / {r['p50_ms_cache_miss']} |" if hits else "- |"))
     lines += ["", "What each scenario shows:", ""] + [f"- **{name}**: {desc}" for name, desc, _, _ in rows]
     out = "\n".join(lines)
     print(out)

@@ -57,6 +57,11 @@ learnings are folded into the relevant section rather than appended.
 - Redaction runs in a **thread** (`asyncio.to_thread`) behind a lock, because
   spaCy is CPU-bound and not guaranteed thread-safe. This makes PII the main
   per-process throughput limit (see benchmarks); scale with more uvicorn workers.
+- **Presidio results are memoized** by SHA-256 of the message text (10k
+  entries, LRU). The first benchmark showed cache hits barely improved
+  throughput because every request, hit or not, still paid for Presidio.
+  Repeated prompts, shared system prompts and chat history (re-sent every turn)
+  now skip it. The memo stores only hashes and span offsets, never text.
 - Placeholders are applied to **all roles** (system, assistant history too),
   since PII in history leaks just as much.
 - Known limit: if the model rewrites a placeholder (e.g. `<Person 1>`), it
@@ -121,6 +126,9 @@ learnings are folded into the relevant section rather than appended.
   straight to the next provider (our key is bad, retrying won't help);
   other 4xx → return to the client immediately (the request itself is wrong,
   every provider would reject it).
+- For streamed responses the `x-gateway-cost-usd` header is sent before the
+  usage is known, so it reads 0; the real cost is logged when the stream ends
+  (dashboard, SQLite) and usage is in the final chunk if requested.
 - **Streaming falls back only before the first chunk.** After that the
   response is committed; a mid-stream failure ends the stream with an error
   event.
@@ -152,6 +160,20 @@ learnings are folded into the relevant section rather than appended.
 - Light and dark mode via CSS variables; colors from a CVD-checked palette.
 - Optional `DASHBOARD_TOKEN`; open by default for local dev. Only counts are
   stored and shown, never content.
+
+## Benchmarking
+
+- **The first load generator was the bottleneck, not the gateway.** One Python
+  httpx process topped out at ~350–380 req/s, even against the trivial
+  `/healthz` endpoint. ApacheBench showed the full chat pipeline (PII and cache
+  off) doing ~3,400 req/s on one worker. The load generator now splits its
+  work across processes (default 8 in the benchmark), which got within ~15% of
+  ApacheBench while keeping the realistic prompt mix (PII, streaming, repeats).
+- Tried `PRAGMA synchronous=NORMAL` (standard with WAL) on the theory that the
+  per-request commit fsync was costly. It gained ~3%; kept, since it is safe
+  with WAL, but it wasn't the bottleneck.
+- Each scenario runs in a fresh process with an empty cache and database, after
+  a 200-request warm-up.
 
 ## Testing
 

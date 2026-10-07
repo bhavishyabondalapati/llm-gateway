@@ -58,7 +58,8 @@ async def _run_shard(args, shard: int, shards: int) -> dict:
         for i in range(args.requests)
     ][shard::shards]
     concurrency = max(1, args.concurrency // shards)
-    raw = {"latencies": [], "ttfb": [], "statuses": Counter(), "cache": Counter(), "providers": Counter()}
+    raw = {"latencies": [], "ttfb": [], "by_cache": {}, "statuses": Counter(), "cache": Counter(),
+           "providers": Counter()}
     queue: asyncio.Queue = asyncio.Queue()
     for j in jobs:
         queue.put_nowait(j)
@@ -84,7 +85,10 @@ async def _run_shard(args, shard: int, shards: int) -> dict:
                         raw["cache"][r.headers.get("x-gateway-cache", "-")] += 1
                         raw["providers"][r.headers.get("x-gateway-provider", "-")] += 1
                         if r.status_code == 200:
-                            raw["latencies"].append((time.perf_counter() - t0) * 1000)
+                            ms = (time.perf_counter() - t0) * 1000
+                            raw["latencies"].append(ms)
+                            hit = r.headers.get("x-gateway-cache") in ("exact", "semantic")
+                            raw["by_cache"].setdefault("hit" if hit else "miss", []).append(ms)
                             raw["ttfb"].append(((first or time.perf_counter()) - t0) * 1000)
                 except httpx.HTTPError as e:
                     raw["statuses"][type(e).__name__] += 1
@@ -117,6 +121,7 @@ def run(args) -> dict:
     ttfb = [x for s in shards for x in s["ttfb"]]
     merged = {k: sum((s[k] for s in shards), Counter()) for k in ("statuses", "cache", "providers")}
     elapsed = max(s["end"] for s in shards) - min(s["start"] for s in shards)
+    by_cache = {k: [x for s in shards for x in s["by_cache"].get(k, [])] for k in ("hit", "miss")}
     return {
         "requests": args.requests,
         "concurrency": args.concurrency,
@@ -126,6 +131,8 @@ def run(args) -> dict:
         "success_rate": round(merged["statuses"].get(200, 0) / args.requests, 4),
         "latency_ms": {p: round(pct(latencies, p), 1) for p in (50, 90, 95, 99)},
         "ttfb_ms_p50": round(pct(ttfb, 50), 1),
+        "p50_ms_cache_hit": round(pct(by_cache["hit"], 50), 1),
+        "p50_ms_cache_miss": round(pct(by_cache["miss"], 50), 1),
         "statuses": dict(merged["statuses"]),
         "cache": dict(merged["cache"]),
         "providers": dict(merged["providers"]),
@@ -154,6 +161,8 @@ def main():
     print(f"{result['requests']} requests @ concurrency {result['concurrency']} ({result['processes']} procs) in {result['elapsed_s']}s "
           f"-> {result['throughput_rps']} req/s, success {result['success_rate']:.1%}")
     print(f"latency ms  p50 {lat[50]}  p90 {lat[90]}  p95 {lat[95]}  p99 {lat[99]}   (ttfb p50 {result['ttfb_ms_p50']})")
+    if result["cache"].get("exact") or result["cache"].get("semantic"):
+        print(f"p50 by cache: hit {result['p50_ms_cache_hit']} ms, miss {result['p50_ms_cache_miss']} ms")
     print(f"statuses {result['statuses']}")
     print(f"cache    {result['cache']}")
     print(f"provider {result['providers']}")
