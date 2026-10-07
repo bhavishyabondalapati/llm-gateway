@@ -4,14 +4,17 @@ Important design points:
 - Entries are stored *after* PII redaction, so the cache never holds raw PII. A
   hit is restored with the *current* request's mapping.
 - Entries are scoped per team, so one team can never read another team's answers.
-- Semantic matches must also share the same model, sampling params and set of
-  PII placeholders; only the wording of the conversation may differ.
+- Semantic matches must also share the same model, sampling params, set of PII
+  placeholders and the same numbers; only the wording may differ. Numbers are
+  checked exactly because embeddings blur them ("fact about 12" ~ "fact about 13")
+  even though they usually change the answer.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -21,6 +24,8 @@ import numpy as np
 from gateway.embeddings import Embedder
 from gateway.pii import PLACEHOLDER_RE
 from gateway.schemas import ChatCompletionRequest, message_text
+
+_NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)*")
 
 # Request fields that don't change the answer and so aren't part of the cache key.
 _IGNORED_FIELDS = {"stream", "user", "messages", "stream_options"}
@@ -64,6 +69,15 @@ class ResponseCache:
         self.max_entries = max_entries
         self.threshold = semantic_threshold
         self._entries: OrderedDict[str, _Entry] = OrderedDict()
+        self._by_scope: dict[str, set[str]] = {}  # scope -> keys, so lookups skip other scopes
+
+    def _remove(self, key: str) -> None:
+        entry = self._entries.pop(key)
+        keys = self._by_scope.get(entry.scope)
+        if keys is not None:
+            keys.discard(key)
+            if not keys:
+                del self._by_scope[entry.scope]
 
     # --- keys -----------------------------------------------------------
     def exact_key(self, team: str, req: ChatCompletionRequest) -> str:
@@ -73,8 +87,10 @@ class ResponseCache:
 
     def semantic_scope(self, team: str, req: ChatCompletionRequest) -> str:
         params = req.model_dump(exclude=_IGNORED_FIELDS, exclude_none=True)
-        placeholders = sorted(set(PLACEHOLDER_RE.findall(conversation_text(req))))
-        return _hash({"team": team, "params": params, "placeholders": placeholders})
+        text = conversation_text(req)
+        placeholders = sorted(set(PLACEHOLDER_RE.findall(text)))
+        numbers = _NUMBER_RE.findall(PLACEHOLDER_RE.sub("", text))
+        return _hash({"team": team, "params": params, "placeholders": placeholders, "numbers": numbers})
 
     # --- lookups --------------------------------------------------------
     def get_exact(self, key: str) -> CachedResponse | None:
@@ -82,7 +98,7 @@ class ResponseCache:
         if entry is None:
             return None
         if entry.expires_at < time.time():
-            del self._entries[key]
+            self._remove(key)
             return None
         self._entries.move_to_end(key)
         return entry.value
@@ -95,8 +111,8 @@ class ResponseCache:
             return None
         now = time.time()
         candidates = [
-            (k, e) for k, e in self._entries.items()
-            if e.scope == scope and e.vector is not None and e.expires_at >= now
+            (k, e) for k in self._by_scope.get(scope, ())
+            if (e := self._entries[k]).vector is not None and e.expires_at >= now
         ]
         if not candidates:
             return None
@@ -111,10 +127,12 @@ class ResponseCache:
 
     # --- writes ---------------------------------------------------------
     def put(self, key: str, scope: str, vector: np.ndarray | None, value: CachedResponse) -> None:
+        if key in self._entries:
+            self._remove(key)
         self._entries[key] = _Entry(value, time.time() + self.ttl, scope, vector)
-        self._entries.move_to_end(key)
+        self._by_scope.setdefault(scope, set()).add(key)
         while len(self._entries) > self.max_entries:
-            self._entries.popitem(last=False)  # evict least recently used
+            self._remove(next(iter(self._entries)))  # evict least recently used
 
     def __len__(self) -> int:
         return len(self._entries)

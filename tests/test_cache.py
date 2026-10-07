@@ -67,3 +67,10 @@ def test_lru_eviction():
     assert len(c) == 2
     assert c.get_exact(c.exact_key("a", req("two"))) is None
     assert c.get_exact(c.exact_key("a", req("one"))) is not None
+
+
+def test_semantic_requires_same_numbers():
+    c = ResponseCache(HashingEmbedder(), semantic_threshold=0.5)
+    put(c, "a", req("Give me one fact about the number 12"))
+    assert semantic(c, "a", req("give me one fact about the number 12!")) is not None
+    assert semantic(c, "a", req("Give me one fact about the number 13")) is None
