@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LLM Gateway</title>
+<style>
+  :root {
+    color-scheme: light;
+    --surface-0: #f4f3f0;
+    --surface-1: #fcfcfb;
+    --grid: #e4e3df;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted: #7a7974;
+    --series-1: #2a78d6;
+    --series-2: #eb6834;
+    --critical: #c62f2f;
+    --track: #cde2fb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --surface-0: #111110;
+      --surface-1: #1a1a19;
+      --grid: #2e2e2c;
+      --text-primary: #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted: #8f8e86;
+      --series-1: #3987e5;
+      --series-2: #d95926;
+      --critical: #e66767;
+      --track: #184f95;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --surface-0: #111110; --surface-1: #1a1a19; --grid: #2e2e2c;
+    --text-primary: #ffffff; --text-secondary: #c3c2b7; --text-muted: #8f8e86;
+    --series-1: #3987e5; --series-2: #d95926; --critical: #e66767; --track: #184f95;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--surface-0); color: var(--text-primary);
+         font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1200px; margin: 0 auto; padding: 24px 16px 48px; }
+  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+  h1 { font-size: 20px; margin: 0; font-weight: 600; }
+  .sub { color: var(--text-secondary); font-size: 13px; }
+  .controls { display: flex; gap: 8px; align-items: center; }
+  .seg { display: inline-flex; border: 1px solid var(--grid); border-radius: 8px; overflow: hidden; background: var(--surface-1); }
+  .seg button { border: 0; background: transparent; color: var(--text-secondary); padding: 6px 12px; font: inherit; cursor: pointer; }
+  .seg button[aria-pressed="true"] { background: var(--text-primary); color: var(--surface-1); }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .tile, .card { background: var(--surface-1); border: 1px solid var(--grid); border-radius: 12px; padding: 14px 16px; }
+  .tile .label { color: var(--text-secondary); font-size: 12px; }
+  .tile .value { font-size: 24px; font-weight: 600; margin-top: 2px; }
+  .tile .note { color: var(--text-muted); font-size: 12px; }
+  .tile.hero .value { font-size: 48px; line-height: 1.1; }
+  .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; margin-bottom: 16px; }
+  .card h2 { font-size: 14px; font-weight: 600; margin: 0; }
+  .card .desc { color: var(--text-secondary); font-size: 12px; margin: 2px 0 8px; }
+  .legend { display: flex; gap: 14px; font-size: 12px; color: var(--text-secondary); margin-bottom: 4px; }
+  .key { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+  .key.line { height: 2px; width: 14px; vertical-align: 3px; }
+  svg { display: block; width: 100%; height: auto; overflow: visible; }
+  svg text { fill: var(--text-muted); font-size: 11px; }
+  .empty { color: var(--text-muted); padding: 40px 0; text-align: center; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; font-weight: 500; color: var(--text-secondary); border-bottom: 1px solid var(--grid); padding: 6px 8px; }
+  td { padding: 6px 8px; border-bottom: 1px solid var(--grid); font-variant-numeric: tabular-nums; }
+  td.num, th.num { text-align: right; }
+  .scroll { overflow-x: auto; }
+  .meter { height: 8px; border-radius: 4px; background: var(--track); overflow: hidden; min-width: 80px; }
+  .meter > div { height: 100%; background: var(--series-1); border-radius: 4px; }
+  .badge { font-size: 11px; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--grid); color: var(--text-secondary); }
+  .err { color: var(--critical); }
+  #tip { position: fixed; pointer-events: none; background: var(--text-primary); color: var(--surface-1);
+         padding: 6px 9px; border-radius: 6px; font-size: 12px; line-height: 1.4; display: none; z-index: 10; white-space: nowrap; }
+  #auth { display: none; gap: 8px; margin-bottom: 16px; }
+  #auth input { padding: 6px 8px; border: 1px solid var(--grid); border-radius: 6px; background: var(--surface-1); color: var(--text-primary); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>LLM Gateway</h1>
+      <div class="sub" id="updated">Loading…</div>
+    </div>
+    <div class="controls">
+      <div class="seg" role="group" aria-label="Time window" id="windows">
+        <button data-w="900">15m</button>
+        <button data-w="3600" aria-pressed="true">1h</button>
+        <button data-w="86400">24h</button>
+        <button data-w="604800">7d</button>
+      </div>
+    </div>
+  </header>
+
+  <form id="auth"><input id="token" type="password" placeholder="Dashboard token"><button>Save</button></form>
+
+  <section class="tiles" id="tiles"></section>
+
+  <section class="grid2">
+    <div class="card">
+      <h2>Latency</h2>
+      <div class="desc">Per-minute p50 and p95, successful requests (ms)</div>
+      <div class="legend"><span><span class="key line" style="background:var(--series-1)"></span>p50</span><span><span class="key line" style="background:var(--series-2)"></span>p95</span></div>
+      <div id="latency"></div>
+    </div>
+    <div class="card">
+      <h2>Requests and cache hits</h2>
+      <div class="desc">Requests per minute, split by whether the cache answered</div>
+      <div class="legend"><span><span class="key" style="background:var(--series-1)"></span>Cache hit</span><span><span class="key" style="background:var(--series-2)"></span>Sent to provider</span></div>
+      <div id="requests"></div>
+    </div>
+    <div class="card">
+      <h2>Cost</h2>
+      <div class="desc">Provider spend per minute (USD)</div>
+      <div id="cost"></div>
+    </div>
+    <div class="card">
+      <h2>PII redactions by type</h2>
+      <div class="desc">Entities replaced with placeholders before leaving the gateway</div>
+      <div id="entities"></div>
+    </div>
+  </section>
+
+  <section class="grid2">
+    <div class="card">
+      <h2>Teams</h2>
+      <div class="desc">Usage in this window, and monthly token budget</div>
+      <div class="scroll" id="teams"></div>
+    </div>
+    <div class="card">
+      <h2>Providers</h2>
+      <div class="desc">Who served traffic ("cache" = answered by the gateway)</div>
+      <div class="scroll" id="providers"></div>
+    </div>
+  </section>
+
+  <div class="card">
+    <h2>Recent requests</h2>
+    <div class="desc">Newest first. Content is never stored, only counts.</div>
+    <div class="scroll" id="recent"></div>
+  </div>
+</main>
+<div id="tip"></div>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const NS = "http://www.w3.org/2000/svg";
+  let windowSec = 3600;
+  try { windowSec = +localStorage.getItem("gw-window") || 3600; } catch (e) {}
+
+  // ---------- formatting ----------
+  const nf = new Intl.NumberFormat("en-US");
+  const compact = (n) => Math.abs(n) >= 10000 ? new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(n) : nf.format(Math.round(n));
+  const usd = (n) => n === 0 ? "$0" : n < 0.01 ? "$" + n.toFixed(5) : "$" + n.toFixed(n < 10 ? 4 : 2);
+  const ms = (n) => n >= 1000 ? (n / 1000).toFixed(2) + " s" : Math.round(n) + " ms";
+  const pct = (n) => (n * 100).toFixed(1) + "%";
+  const hhmm = (ts) => new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+  // ---------- tooltip ----------
+  const tip = $("tip");
+  const showTip = (html, ev) => {
+    tip.innerHTML = html; tip.style.display = "block";
+    const r = tip.getBoundingClientRect();
+    let x = ev.clientX + 14, y = ev.clientY + 14;
+    if (x + r.width > innerWidth - 8) x = ev.clientX - r.width - 14;
+    if (y + r.height > innerHeight - 8) y = ev.clientY - r.height - 14;
+    tip.style.left = x + "px"; tip.style.top = y + "px";
+  };
+  const hideTip = () => { tip.style.display = "none"; };
+
+  // ---------- svg helpers ----------
+  const el = (name, attrs = {}, parent) => {
+    const n = document.createElementNS(NS, name);
+    for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+    if (parent) parent.appendChild(n);
+    return n;
+  };
+  const niceMax = (v) => {
+    if (v <= 0) return 1;
+    const p = Math.pow(10, Math.floor(Math.log10(v)));
+    for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= v) return m * p;
+    return 10 * p;
+  };
+  // Column with 4px rounded top, square at baseline.
+  const colPath = (x, y, w, h) => {
+    if (h <= 0) return "";
+    const r = Math.min(4, w / 2, h);
+    return `M${x},${y + h}V${y + r}Q${x},${y} ${x + r},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + h}Z`;
+  };
+
+  const W = 520, H = 200, M = { t: 10, r: 44, b: 22, l: 48 };
+
+  function frame(target, yMax, fmtY, series) {
+    target.innerHTML = "";
+    const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img" });
+    const ih = H - M.t - M.b;
+    for (let i = 0; i <= 4; i++) {
+      const y = M.t + ih - (ih * i) / 4;
+      el("line", { x1: M.l, x2: W - M.r, y1: y, y2: y, stroke: "var(--grid)", "stroke-width": 1 }, svg);
+      el("text", { x: M.l - 6, y: y + 4, "text-anchor": "end" }, svg).textContent = fmtY((yMax * i) / 4);
+    }
+    const n = series.length;
+    const ticks = Math.min(n, 5);
+    for (let i = 0; i < ticks; i++) {
+      const idx = ticks === 1 ? 0 : Math.round((i * (n - 1)) / (ticks - 1));
+      el("text", { x: xAt(idx, n), y: H - 6, "text-anchor": "middle" }, svg).textContent = hhmm(series[idx].ts);
+    }
+    target.appendChild(svg);
+    return svg;
+  }
+  const xAt = (i, n) => n === 1 ? (M.l + W - M.r) / 2 : M.l + ((W - M.l - M.r) * i) / (n - 1);
+  const band = (n) => (W - M.l - M.r) / n;
+  const xBand = (i, n) => M.l + band(n) * i;
+
+  function empty(target, msg = "No data in this window yet") { target.innerHTML = `<div class="empty">${msg}</div>`; }
+
+  function lineChart(target, series) {
+    if (!series.length) return empty(target);
+    const yMax = niceMax(Math.max(...series.map((s) => s.p95_latency_ms), 1));
+    const svg = frame(target, yMax, (v) => ms(v), series);
+    const ih = H - M.t - M.b;
+    const yOf = (v) => M.t + ih - (ih * v) / yMax;
+    const n = series.length;
+    const lines = [["p50_latency_ms", "var(--series-1)", "p50"], ["p95_latency_ms", "var(--series-2)", "p95"]];
+    for (const [k, color, label] of lines) {
+      const d = series.map((s, i) => `${i ? "L" : "M"}${xAt(i, n)},${yOf(s[k])}`).join("");
+      el("path", { d, fill: "none", stroke: color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }, svg);
+      const last = series[n - 1];
+      el("circle", { cx: xAt(n - 1, n), cy: yOf(last[k]), r: 4, fill: color, stroke: "var(--surface-1)", "stroke-width": 2 }, svg);
+    }
+    // direct end labels, only when they don't collide
+    const last = series[n - 1];
+    const y50 = yOf(last.p50_latency_ms), y95 = yOf(last.p95_latency_ms);
+    if (Math.abs(y50 - y95) > 13) {
+      el("text", { x: W - M.r + 8, y: y95 + 4 }, svg).textContent = "p95";
+      el("text", { x: W - M.r + 8, y: y50 + 4 }, svg).textContent = "p50";
+    }
+    // crosshair + tooltip
+    const cross = el("line", { y1: M.t, y2: M.t + ih, stroke: "var(--text-muted)", "stroke-width": 1, visibility: "hidden" }, svg);
+    const hit = el("rect", { x: M.l, y: M.t, width: W - M.l - M.r, height: ih, fill: "transparent" }, svg);
+    hit.addEventListener("mousemove", (ev) => {
+      const pt = svg.createSVGPoint(); pt.x = ev.clientX; pt.y = ev.clientY;
+      const p = pt.matrixTransform(svg.getScreenCTM().inverse());
+      const i = Math.max(0, Math.min(n - 1, Math.round(((p.x - M.l) / (W - M.l - M.r)) * (n - 1))));
+      const s = series[i];
+      cross.setAttribute("x1", xAt(i, n)); cross.setAttribute("x2", xAt(i, n)); cross.setAttribute("visibility", "visible");
+      showTip(`<b>${hhmm(s.ts)}</b><br>p50 ${ms(s.p50_latency_ms)}<br>p95 ${ms(s.p95_latency_ms)}<br>${nf.format(s.requests)} requests`, ev);
+    });
+    hit.addEventListener("mouseleave", () => { cross.setAttribute("visibility", "hidden"); hideTip(); });
+  }
+
+  function columnChart(target, series, stacks, fmtY, tipFn) {
+    if (!series.length) return empty(target);
+    const totals = series.map((s) => stacks.reduce((a, [k]) => a + s[k], 0));
+    const yMax = niceMax(Math.max(...totals, 0) || 1);
+    const svg = frame(target, yMax, fmtY, series);
+    const ih = H - M.t - M.b;
+    const n = series.length;
+    const bw = Math.max(2, Math.min(24, band(n) - 2));
+    series.forEach((s, i) => {
+      const cx = xAt(i, n);
+      let base = M.t + ih;
+      stacks.forEach(([k, color], j) => {
+        const h = (ih * s[k]) / yMax;
+        if (h <= 0) return;
+        const top = j === stacks.length - 1 || stacks.slice(j + 1).every(([k2]) => s[k2] === 0);
+        const gap = j > 0 ? 2 : 0; // 2px surface gap between stacked segments
+        const y = base - h, hh = Math.max(0, h - gap);
+        if (top) el("path", { d: colPath(cx - bw / 2, y, bw, hh), fill: color }, svg);
+        else el("rect", { x: cx - bw / 2, y, width: bw, height: hh, fill: color }, svg);
+        base = y;
+      });
+      const hit = el("rect", { x: cx - band(n) / 2, y: M.t, width: band(n), height: ih, fill: "transparent" }, svg);
+      hit.addEventListener("mousemove", (ev) => showTip(tipFn(s), ev));
+      hit.addEventListener("mouseleave", hideTip);
+    });
+  }
+
+  function barList(target, rows) {
+    if (!rows.length) return empty(target, "No PII detected in this window");
+    const max = Math.max(...rows.map((r) => r.count));
+    const rowH = 26, labelW = 130, valW = 50;
+    const h = rows.length * rowH;
+    target.innerHTML = "";
+    const svg = el("svg", { viewBox: `0 0 ${W} ${h}`, role: "img" });
+    rows.forEach((r, i) => {
+      const y = i * rowH;
+      const w = Math.max(2, ((W - labelW - valW) * r.count) / max);
+      el("text", { x: labelW - 8, y: y + 17, "text-anchor": "end" }, svg).textContent = r.entity_type;
+      const bh = 16, by = y + 5, rr = Math.min(4, w / 2);
+      el("path", { d: `M${labelW},${by}H${labelW + w - rr}Q${labelW + w},${by} ${labelW + w},${by + rr}V${by + bh - rr}Q${labelW + w},${by + bh} ${labelW + w - rr},${by + bh}H${labelW}Z`, fill: "var(--series-1)" }, svg);
+      const t = el("text", { x: labelW + w + 6, y: y + 17 }, svg); t.textContent = nf.format(r.count);
+      t.style.fill = "var(--text-primary)";
+      const hit = el("rect", { x: 0, y, width: W, height: rowH, fill: "transparent" }, svg);
+      hit.addEventListener("mousemove", (ev) => showTip(`<b>${esc(r.entity_type)}</b><br>${nf.format(r.count)} redacted`, ev));
+      hit.addEventListener("mouseleave", hideTip);
+    });
+    target.appendChild(svg);
+  }
+
+  function table(target, cols, rows) {
+    if (!rows.length) return empty(target);
+    target.innerHTML = `<table><thead><tr>${cols.map((c) => `<th class="${c.num ? "num" : ""}">${c.label}</th>`).join("")}</tr></thead><tbody>${
+      rows.map((r) => `<tr>${cols.map((c) => `<td class="${c.num ? "num" : ""}">${c.fmt(r)}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+  }
+
+  // ---------- render ----------
+  function render(d) {
+    const t = d.totals;
+    const tile = (label, value, note = "", hero = false) =>
+      `<div class="tile${hero ? " hero" : ""}"><div class="label">${label}</div><div class="value">${value}</div><div class="note">${note}</div></div>`;
+    $("tiles").innerHTML = [
+      tile("Requests", compact(t.requests), t.errors ? `<span class="err">${nf.format(t.errors)} errors</span>` : "no errors"),
+      tile("Cost", usd(t.cost_usd), `${usd(t.saved_usd)} saved by cache`),
+      tile("Cache hit rate", pct(t.cache_hit_rate), `${nf.format(t.cache_hits_exact)} exact · ${nf.format(t.cache_hits_semantic)} semantic`),
+      tile("Latency p50", ms(t.p50_latency_ms), `p95 ${ms(t.p95_latency_ms)}`),
+      tile("PII redactions", compact(t.redactions), `in ${nf.format(t.requests_with_pii)} requests`),
+      tile("Fallbacks", compact(t.fallbacks), "requests needing a retry or backup"),
+    ].join("");
+
+    lineChart($("latency"), d.series);
+    columnChart($("requests"), d.series.map((s) => ({ ...s, miss: s.requests - s.cache_hits })),
+      [["cache_hits", "var(--series-1)"], ["miss", "var(--series-2)"]], (v) => compact(v),
+      (s) => `<b>${hhmm(s.ts)}</b><br>${nf.format(s.requests)} requests<br>${nf.format(s.cache_hits)} cache hits<br>${nf.format(s.errors)} errors`);
+    columnChart($("cost"), d.series, [["cost_usd", "var(--series-1)"]], (v) => usd(v),
+      (s) => `<b>${hhmm(s.ts)}</b><br>${usd(s.cost_usd)}`);
+    barList($("entities"), d.redactions_by_entity);
+
+    const budgets = Object.fromEntries(d.budgets.map((b) => [b.team, b]));
+    const teamRows = d.budgets.map((b) => d.by_team.find((r) => r.team === b.team) || { team: b.team, requests: 0, tokens: 0, cost_usd: 0, p95_latency_ms: 0 });
+    table($("teams"), [
+      { label: "Team", fmt: (r) => esc(r.team) },
+      { label: "Requests", num: true, fmt: (r) => nf.format(r.requests) },
+      { label: "Cost", num: true, fmt: (r) => usd(r.cost_usd) },
+      { label: "p95", num: true, fmt: (r) => ms(r.p95_latency_ms) },
+      { label: "Monthly budget", fmt: (r) => { const b = budgets[r.team]; const f = Math.min(1, b.used / b.budget);
+          return `<div style="display:flex;gap:8px;align-items:center"><div class="meter" style="flex:1"><div style="width:${(f * 100).toFixed(1)}%"></div></div><span>${pct(f)}</span></div>`; } },
+    ], teamRows);
+    table($("providers"), [
+      { label: "Provider", fmt: (r) => esc(r.provider) },
+      { label: "Requests", num: true, fmt: (r) => nf.format(r.requests) },
+      { label: "Errors", num: true, fmt: (r) => nf.format(r.errors) },
+      { label: "Cost", num: true, fmt: (r) => usd(r.cost_usd) },
+      { label: "p95", num: true, fmt: (r) => ms(r.p95_latency_ms) },
+    ], d.by_provider);
+    table($("recent"), [
+      { label: "Time", fmt: (r) => new Date(r.ts * 1000).toLocaleTimeString() },
+      { label: "Team", fmt: (r) => esc(r.team) },
+      { label: "Model", fmt: (r) => esc(r.model) },
+      { label: "Provider", fmt: (r) => esc(r.provider || "-") },
+      { label: "Status", fmt: (r) => r.status === 200 ? "200" : `<span class="err">${r.status}</span>` },
+      { label: "Cache", fmt: (r) => `<span class="badge">${esc(r.cache)}</span>` },
+      { label: "Latency", num: true, fmt: (r) => ms(r.latency_ms) },
+      { label: "Tokens", num: true, fmt: (r) => nf.format(r.prompt_tokens + r.completion_tokens) },
+      { label: "Cost", num: true, fmt: (r) => usd(r.cost_usd) },
+      { label: "PII", num: true, fmt: (r) => nf.format(r.redactions) },
+    ], d.recent);
+    $("updated").textContent = `Updated ${new Date().toLocaleTimeString()} · ${nf.format(d.cache_entries)} cached responses · refreshes every 5 s`;
+  }
+
+  async function load() {
+    let token = "";
+    try { token = localStorage.getItem("gw-dash-token") || ""; } catch (e) {}
+    const r = await fetch(`/dashboard/api/stats?window=${windowSec}`, { headers: token ? { "X-Dashboard-Token": token } : {} });
+    if (r.status === 401) { $("auth").style.display = "flex"; $("updated").textContent = "Dashboard token required"; return; }
+    $("auth").style.display = "none";
+    render(await r.json());
+  }
+
+  for (const b of $("windows").querySelectorAll("button")) {
+    b.setAttribute("aria-pressed", String(+b.dataset.w === windowSec));
+    b.addEventListener("click", () => {
+      windowSec = +b.dataset.w;
+      try { localStorage.setItem("gw-window", windowSec); } catch (e) {}
+      for (const o of $("windows").querySelectorAll("button")) o.setAttribute("aria-pressed", String(o === b));
+      load();
+    });
+  }
+  $("auth").addEventListener("submit", (e) => {
+    e.preventDefault();
+    try { localStorage.setItem("gw-dash-token", $("token").value); } catch (err) {}
+    load();
+  });
+  load().catch((e) => { $("updated").textContent = "Failed to load: " + e; });
+  setInterval(() => load().catch(() => {}), 5000);
+})();
+</script>
+</body>
+</html>
