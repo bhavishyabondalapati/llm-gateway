@@ -4,6 +4,7 @@ Sends N requests with a fixed concurrency and reports throughput, latency
 percentiles, status codes and cache hits. Uses only httpx, so no extra install.
 
     python loadtest/loadtest.py --requests 2000 --concurrency 50
+    python loadtest/loadtest.py --requests 5000 --concurrency 64 --processes 4   # for >400 req/s
     python loadtest/loadtest.py --repeat-ratio 0.5 --pii-ratio 0.3 --stream-ratio 0.1
 
 Prompt mix:
@@ -17,9 +18,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import multiprocessing
 import random
 import time
 from collections import Counter
+from concurrent.futures import ProcessPoolExecutor
 
 import httpx
 
@@ -47,22 +50,20 @@ def pct(values: list[float], p: float) -> float:
     return values[lo] + (values[hi] - values[lo]) * (k - lo)
 
 
-async def run(args) -> dict:
+async def _run_shard(args, shard: int, shards: int) -> dict:
+    """Run every `shards`-th job starting at `shard`; return raw measurements."""
     rng = random.Random(args.seed)
     jobs = [
         (make_prompt(rng, i, args.repeat_ratio, args.pii_ratio), rng.random() < args.stream_ratio)
         for i in range(args.requests)
-    ]
-    latencies: list[float] = []
-    ttfb: list[float] = []
-    statuses: Counter = Counter()
-    caches: Counter = Counter()
-    providers: Counter = Counter()
+    ][shard::shards]
+    concurrency = max(1, args.concurrency // shards)
+    raw = {"latencies": [], "ttfb": [], "statuses": Counter(), "cache": Counter(), "providers": Counter()}
     queue: asyncio.Queue = asyncio.Queue()
     for j in jobs:
         queue.put_nowait(j)
 
-    limits = httpx.Limits(max_connections=args.concurrency, max_keepalive_connections=args.concurrency)
+    limits = httpx.Limits(max_connections=concurrency, max_keepalive_connections=concurrency)
     async with httpx.AsyncClient(base_url=args.url, timeout=60, limits=limits,
                                  headers={"Authorization": f"Bearer {args.key}"}) as client:
 
@@ -79,31 +80,55 @@ async def run(args) -> dict:
                         first = None
                         async for _ in r.aiter_bytes():
                             first = first or time.perf_counter()
-                        statuses[r.status_code] += 1
-                        caches[r.headers.get("x-gateway-cache", "-")] += 1
-                        providers[r.headers.get("x-gateway-provider", "-")] += 1
+                        raw["statuses"][r.status_code] += 1
+                        raw["cache"][r.headers.get("x-gateway-cache", "-")] += 1
+                        raw["providers"][r.headers.get("x-gateway-provider", "-")] += 1
                         if r.status_code == 200:
-                            latencies.append((time.perf_counter() - t0) * 1000)
-                            ttfb.append(((first or time.perf_counter()) - t0) * 1000)
+                            raw["latencies"].append((time.perf_counter() - t0) * 1000)
+                            raw["ttfb"].append(((first or time.perf_counter()) - t0) * 1000)
                 except httpx.HTTPError as e:
-                    statuses[type(e).__name__] += 1
+                    raw["statuses"][type(e).__name__] += 1
 
-        started = time.perf_counter()
-        await asyncio.gather(*(worker() for _ in range(args.concurrency)))
-        elapsed = time.perf_counter() - started
+        raw["start"] = time.time()
+        await asyncio.gather(*(worker() for _ in range(concurrency)))
+        raw["end"] = time.time()
+    return raw
 
-    ok = statuses.get(200, 0)
+
+def _shard_entry(args_dict: dict, shard: int, shards: int) -> dict:
+    return asyncio.run(_run_shard(argparse.Namespace(**args_dict), shard, shards))
+
+
+def run(args) -> dict:
+    """Run the load test, split over `args.processes` client processes.
+
+    One Python process tops out around 350-400 req/s because the client itself
+    becomes the bottleneck (measured against the trivial /healthz endpoint), so
+    several processes are needed to measure a fast gateway.
+    """
+    processes = getattr(args, "processes", 1)
+    if processes == 1:
+        shards = [asyncio.run(_run_shard(args, 0, 1))]
+    else:
+        with ProcessPoolExecutor(processes, mp_context=multiprocessing.get_context("spawn")) as pool:
+            shards = list(pool.map(_shard_entry, [vars(args)] * processes, range(processes), [processes] * processes))
+
+    latencies = [x for s in shards for x in s["latencies"]]
+    ttfb = [x for s in shards for x in s["ttfb"]]
+    merged = {k: sum((s[k] for s in shards), Counter()) for k in ("statuses", "cache", "providers")}
+    elapsed = max(s["end"] for s in shards) - min(s["start"] for s in shards)
     return {
         "requests": args.requests,
         "concurrency": args.concurrency,
+        "processes": processes,
         "elapsed_s": round(elapsed, 2),
         "throughput_rps": round(args.requests / elapsed, 1),
-        "success_rate": round(ok / args.requests, 4),
+        "success_rate": round(merged["statuses"].get(200, 0) / args.requests, 4),
         "latency_ms": {p: round(pct(latencies, p), 1) for p in (50, 90, 95, 99)},
         "ttfb_ms_p50": round(pct(ttfb, 50), 1),
-        "statuses": dict(statuses),
-        "cache": dict(caches),
-        "providers": dict(providers),
+        "statuses": dict(merged["statuses"]),
+        "cache": dict(merged["cache"]),
+        "providers": dict(merged["providers"]),
     }
 
 
@@ -117,15 +142,16 @@ def main():
     ap.add_argument("--repeat-ratio", type=float, default=0.3)
     ap.add_argument("--pii-ratio", type=float, default=0.3)
     ap.add_argument("--stream-ratio", type=float, default=0.1)
+    ap.add_argument("--processes", type=int, default=1, help="client processes (use 4+ for >400 req/s)")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--json", action="store_true", help="print the result as JSON only")
     args = ap.parse_args()
-    result = asyncio.run(run(args))
+    result = run(args)
     if args.json:
         print(json.dumps(result))
         return
     lat = result["latency_ms"]
-    print(f"{result['requests']} requests @ concurrency {result['concurrency']} in {result['elapsed_s']}s "
+    print(f"{result['requests']} requests @ concurrency {result['concurrency']} ({result['processes']} procs) in {result['elapsed_s']}s "
           f"-> {result['throughput_rps']} req/s, success {result['success_rate']:.1%}")
     print(f"latency ms  p50 {lat[50]}  p90 {lat[90]}  p95 {lat[95]}  p99 {lat[99]}   (ttfb p50 {result['ttfb_ms_p50']})")
     print(f"statuses {result['statuses']}")

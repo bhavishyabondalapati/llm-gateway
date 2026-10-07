@@ -1,0 +1,17 @@
+# Config used only by loadtest/benchmark.py
+teams:
+  - name: bench
+    api_key_sha256: 6528fa997e41d15cacb9444054fa43a2b9746196f70c99f59476f4e10ec937f5  # gw-bench-key
+    requests_per_minute: 10000000
+    monthly_token_budget: 1000000000000
+providers:
+  instant: {type: fake, latency_ms: 0}
+  slow50: {type: fake, latency_ms: 50}
+  flaky: {type: fake, latency_ms: 50, failure_rate: 0.3}
+  backup: {type: fake, latency_ms: 50}
+models:
+  instant: {targets: [{provider: instant}]}
+  realistic: {targets: [{provider: slow50}]}
+  flaky: {targets: [{provider: flaky}, {provider: backup}]}
+pricing:
+  realistic: {input_per_million: 0.15, output_per_million: 0.60}
