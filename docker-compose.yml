@@ -1,0 +1,37 @@
+# docker compose up --build
+#   Gateway:    http://localhost:8080   (dashboard at /dashboard)
+#   Jaeger UI:  http://localhost:16686  (traces, service "llm-gateway")
+# Load test:   docker compose --profile loadtest run --rm loadtest
+
+services:
+  gateway:
+    build: .
+    ports:
+      - "8080:8080"
+    env_file:
+      - path: .env        # optional: real provider keys
+        required: false
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      DATABASE_PATH: /app/data/gateway.db
+    volumes:
+      - gateway-data:/app/data
+    depends_on:
+      - jaeger
+
+  jaeger:
+    image: cr.jaegertracing.io/jaegertracing/jaeger:2.21.0   # all-in-one, in-memory storage
+    ports:
+      - "16686:16686"   # UI
+      - "4318:4318"     # OTLP/HTTP, so a gateway running outside Docker can send traces too
+
+  loadtest:
+    build: .
+    profiles: ["loadtest"]
+    command: ["python", "loadtest/loadtest.py", "--url", "http://gateway:8080", "--requests", "2000", "--concurrency", "50"]
+    depends_on:
+      gateway:
+        condition: service_healthy
+
+volumes:
+  gateway-data:
