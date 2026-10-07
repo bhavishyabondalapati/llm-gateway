@@ -26,6 +26,7 @@ class FakeProvider(Provider):
         self.failure_rate = failure_rate
         self.rng = random.Random(seed)
         self.calls = 0  # handy in tests
+        self.last_request: ChatCompletionRequest | None = None  # what actually left the gateway
 
     def _reply(self, req: ChatCompletionRequest) -> str:
         last_user = next((message_text(m) for m in reversed(req.messages) if m.role == "user"), "")
@@ -35,14 +36,15 @@ class FakeProvider(Provider):
         prompt = sum(estimate_tokens(message_text(m)) + 4 for m in req.messages)
         return prompt, estimate_tokens(reply)
 
-    async def _maybe_fail(self) -> None:
+    async def _maybe_fail(self, req: ChatCompletionRequest) -> None:
         self.calls += 1
+        self.last_request = req
         await asyncio.sleep(self.latency_ms / 1000 * self.rng.uniform(0.5, 1.5))
         if self.rng.random() < self.failure_rate:
             raise ProviderError(f"{self.name}: simulated outage", status=503)
 
     async def complete(self, req: ChatCompletionRequest, model: str) -> ProviderResponse:
-        await self._maybe_fail()
+        await self._maybe_fail(req)
         reply = self._reply(req)
         if req.max_tokens is not None:
             reply = reply[: req.max_tokens * 4]
@@ -57,7 +59,7 @@ class FakeProvider(Provider):
         )
 
     async def stream(self, req: ChatCompletionRequest, model: str) -> AsyncIterator[StreamChunk]:
-        await self._maybe_fail()
+        await self._maybe_fail(req)
         reply = self._reply(req)
         # Emit 5-character pieces so placeholders get split across chunks.
         for i in range(0, len(reply), 5):
