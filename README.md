@@ -1,14 +1,20 @@
 # LLM Gateway
 
-A self-hosted gateway that sits between your apps and LLM providers. Apps call
-one **OpenAI-compatible `/v1/chat/completions` endpoint**; the gateway strips
-personal data (PII) before anything leaves your network and puts it back in the
-answer. It also enforces per-team keys, rate limits and token budgets, caches
-repeated questions, retries and fails over between providers, and records the
-cost, latency and a trace for every request.
+A self-hosted, OpenAI-compatible gateway between applications and LLM providers. It redacts personal data before requests leave the network and restores it in responses, enforces per-team API keys, rate limits, and token budgets, caches repeated requests, retries and fails over between providers, and records cost, latency, and an OpenTelemetry trace for every request.
 
-It runs **fully offline** with fake providers (that's how it's tested). Add an
-OpenAI or Anthropic key to `.env` and real providers are used first.
+It runs fully offline with fake providers, which is how it is tested. With an OpenAI or Anthropic key in `.env`, real providers are used first.
+
+## Features
+
+- **OpenAI-compatible API**: `/v1/chat/completions` and `/v1/models`, including streaming and OpenAI-style errors; existing clients switch by changing `base_url`.
+- **Reversible PII redaction** with Microsoft Presidio and spaCy: values are replaced with numbered placeholders (`John Smith` → `<PERSON_1>`) and restored in the response, including across streamed chunk boundaries.
+- **Team auth and limits**: SHA-256-hashed API keys, a per-team token-bucket rate limiter, and monthly token budgets.
+- **Response cache**: exact and semantic matching on redacted text, isolated per team, with LRU eviction and TTL.
+- **Routing**: per-model fallback chains with retries, exponential backoff, and jitter across OpenAI, Anthropic, and fake providers.
+- **Observability**: SQLite request log for cost and latency, OpenTelemetry spans using the GenAI semantic conventions, and a built-in dashboard.
+- **Docker Compose** setup with a Jaeger trace viewer.
+
+## Architecture
 
 ```
 client (OpenAI SDK) ──► /v1/chat/completions
@@ -23,110 +29,84 @@ client (OpenAI SDK) ──► /v1/chat/completions
                       dashboard  /dashboard
 ```
 
-## Tools and libraries
+- The PII mapping is held in memory for the duration of a single request; providers never see the original values, and the cache never stores them.
+- Transient errors (429, 5xx, timeouts) are retried and then fall back to the next provider; invalid requests (other 4xx) are not retried. Streaming requests can fall back only before the first byte is sent.
+- Presidio is CPU-bound and runs on a dedicated thread, with a memo for repeated text, so cache hits and other async I/O are not blocked behind it.
+- Prompt content is excluded from traces.
 
-| Tool | Why |
+| Component | Role |
 |---|---|
-| **FastAPI + uvicorn** | Async web framework: one process can wait on many slow LLM calls at once. Pydantic validates the OpenAI request format for free. |
-| **httpx** | Async HTTP client for the upstream providers, with streaming. Also powers the test client. |
-| **Microsoft Presidio (analyzer)** | Proven PII detector (names, emails, phones, cards, SSNs, IPs, IBANs, locations) combining regex rules, checksums and NER. |
-| **spaCy `en_core_web_md`** | The NER model Presidio uses to find names and places. Medium size: much better name boundaries than `sm`, a tenth the size of `lg`. |
-| **NumPy** | Vector math for the semantic cache (cosine similarity). |
-| **OpenTelemetry SDK + OTLP exporter** | Vendor-neutral tracing. Uses the GenAI semantic conventions, so any compatible backend understands the spans. |
-| **SQLite** | Request log for cost/latency/budgets. Zero setup, file-based. |
-| **pydantic-settings, PyYAML, python-dotenv** | Settings from env/.env; routing and teams from a readable YAML file. |
-| **pytest + pytest-asyncio** | Test runner; async tests for the router. |
-| **Docker Compose + Jaeger** | One command to run the gateway with a trace viewer. |
+| FastAPI, uvicorn | Async API; Pydantic validation of the OpenAI request format |
+| httpx | Async, streaming client for upstream providers |
+| Presidio analyzer | PII detection (names, emails, phones, cards, SSNs, IPs, IBANs, locations) via rules, checksums, and NER |
+| spaCy `en_core_web_md` | NER model for Presidio; more accurate name boundaries than `sm`, a tenth the size of `lg` |
+| NumPy | Cosine similarity for the semantic cache |
+| OpenTelemetry SDK, OTLP exporter | Vendor-neutral tracing with GenAI semantic conventions |
+| SQLite | Request log, budget usage, dashboard aggregates |
+| pydantic-settings, PyYAML, python-dotenv | Environment settings and YAML config for teams, providers, routes, and prices |
+| pytest, pytest-asyncio | Test suite |
+| Docker Compose, Jaeger | Containerized deployment with a trace viewer |
 
-## File structure
+## Results
 
-```
-llm-gateway/
-├── gateway/
-│   ├── main.py              App factory and the request pipeline for /v1/chat/completions
-│   ├── config.py            Settings (env) and YAML config models (teams, providers, routes, prices)
-│   ├── schemas.py           OpenAI-compatible request/response models, token estimate
-│   ├── auth.py              Team API keys, stored as SHA-256 hashes
-│   ├── ratelimit.py         Token-bucket rate limiter (requests/minute per team)
-│   ├── pii.py               Presidio redaction, placeholder restoration, streaming restorer
-│   ├── cache.py             Exact + semantic response cache (per team, PII-free, LRU + TTL)
-│   ├── embeddings.py        Offline hashing embedder; optional sentence-transformers embedder
-│   ├── router.py            Fallback chain with retries, backoff and per-attempt spans
-│   ├── pricing.py           Cost from tokens and the price table
-│   ├── store.py             SQLite request log, budget usage, dashboard aggregates
-│   ├── telemetry.py         OpenTelemetry setup and GenAI semantic-convention attributes
-│   ├── dashboard.py         Dashboard page and its JSON stats API
-│   ├── static/dashboard.html  The dashboard (vanilla JS + inline SVG charts, no CDN)
-│   └── providers/
-│       ├── base.py          Provider interface and error classification (retry? fall back?)
-│       ├── fake.py          Offline fake LLM with configurable latency and failure rate
-│       ├── openai_compat.py OpenAI (and any OpenAI-compatible API) adapter
-│       └── anthropic.py     Anthropic Messages API adapter (translates formats)
-├── config/gateway.yaml      Teams, providers, model fallback chains, prices
-├── tests/
-│   ├── conftest.py          Fixtures: test config, shared spaCy model, in-memory span exporter
-│   ├── test_api.py          End-to-end HTTP tests (PII, cache, limits, fallback, streaming, traces)
-│   ├── test_pii.py          Redaction, restoration, split-placeholder streaming
-│   ├── test_cache.py        Exact/semantic hits, team isolation, guards, TTL, LRU
-│   └── test_router.py       Retries, fallback rules, streaming fallback, rate limiter
-├── loadtest/
-│   ├── loadtest.py          Async load generator (throughput, latency percentiles, cache hits)
-│   ├── benchmark.py         Runs the gateway in several configurations and load-tests each
-│   ├── bench.yaml           Config used by the benchmark (fixed-latency fake providers)
-│   └── results.md           Latest benchmark output
-├── scripts/
-│   ├── hash_key.py          Generate a team API key and its hash
-│   ├── eval_semantic_threshold.py  Labeled pairs used to pick the semantic-cache threshold
-│   └── bench_pii.py         Redaction latency vs message length
-├── Dockerfile               Gateway image (non-root, healthcheck)
-├── docker-compose.yml       Gateway + Jaeger (+ optional load-test service)
-├── DECISIONS.md             Every design choice and the reason for it
-├── requirements.txt         Pinned dependencies
-├── pytest.ini               Test settings
-└── .env.example             Optional settings and provider keys (placeholders only)
-```
+All numbers were measured on an Apple M4 Pro (24 GB, Python 3.11) with the load generator on the same machine, so they are relative rather than absolute. Fake providers have fixed latency, so the numbers measure the gateway, not an LLM. Latest output: [loadtest/results.md](loadtest/results.md).
 
-## Setup
+### Benchmarks
+
+`python loadtest/benchmark.py`: 5,000 requests per scenario, 64 concurrent connections across 8 client processes, and a fresh gateway process per scenario.
+
+| Scenario | Throughput (req/s) | p50 ms | p95 ms | p99 ms | Success | Cache hits | p50 hit / miss ms |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Gateway overhead (all features off) | 3,085 | 19.8 | 31.2 | 35.8 | 100% | 0% | - |
+| + PII redaction | 208 | 305.1 | 337.6 | 353.4 | 100% | 0% | - |
+| + PII redaction, 4 workers | 712 | 98.2 | 115.7 | 135.9 | 100% | 0% | - |
+| 50 ms provider, no cache | 341 | 74.1 | 390.9 | 414.2 | 100% | 0% | - |
+| 50 ms provider, cache on | 362 | 2.6 | 433.8 | 461.4 | 100% | 56% | 1.6 / 394.3 |
+| Flaky provider (30% failures) | 186 | 315.2 | 520.2 | 591.6 | 100% | 0% | - |
+
+PII redaction cost by message length (`python scripts/bench_pii.py`, single message, memo disabled):
+
+| Characters | p50 ms | p95 ms |
+|---:|---:|---:|
+| 126 | 4.6 | 5.4 |
+| 418 | 13.0 | 13.5 |
+| 1,513 | 43.1 | 44.5 |
+| 5,893 | 168.6 | 171.4 |
+
+Findings:
+
+- **Gateway overhead is small.** With features off, one worker serves about 3,000 req/s at ~20 ms p50 under 64 concurrent connections (ApacheBench measured ~3,400 req/s on the same path), negligible next to an LLM call.
+- **PII redaction is the bottleneck.** Presidio/spaCy costs ~5 ms of CPU per short message and grows linearly with length (~170 ms for a 6k-character prompt), capping one process at around 200 req/s of new text. Additional workers scale nearly linearly (4 workers: 3.4×), and the memo makes repeated text such as system prompts and chat history nearly free.
+- **Throughput is CPU-bound, not provider-bound.** Waiting on a 50 ms provider costs no CPU under async I/O, so those scenarios are limited by Presidio.
+- **Cache hits are about 250× faster than misses** (1.6 ms vs 394 ms p50 under load) and cost nothing. Overall p95 does not improve because misses still queue behind Presidio.
+- **Fallback keeps success at 100% with 30% upstream failures**, at the cost of tail latency (p99 ~590 ms) from retries and backoff.
+
+### Issues found through load testing
+
+1. **Semantic-cache false hits**: prompts differing only by a number ("fact about 12" vs "13") were served each other's answers. Semantic matches now require identical numbers and placeholders.
+2. **PII false positives**: decimals such as `0.651593` were redacted as phone numbers. Fixed with a plausibility filter.
+3. **Slow cache hits** (~180 ms): hits were queueing behind Presidio on a shared thread pool and lock. A dedicated Presidio thread and inline memo hits reduced them to 1.6 ms.
+4. **Client-bound benchmark**: a single Python client process saturated at ~350 req/s even against `/healthz`. The load generator is now multi-process and was cross-checked with ApacheBench.
+
+## Quickstart
 
 ```bash
 conda create -n llm-gateway python=3.11 -y
-```
-
-```bash
 conda activate llm-gateway
-```
-
-```bash
-pip install -r requirements.txt
-```
-
-`requirements.txt` includes the spaCy model download (~40 MB). Optional: copy
-`.env.example` to `.env` and add `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` to use
-real providers.
-
-## How to run
-
-Start the gateway:
-
-```bash
+pip install -r requirements.txt          # includes the spaCy model (~40 MB)
+cp .env.example .env                     # optional: OPENAI_API_KEY / ANTHROPIC_API_KEY
 uvicorn gateway.main:create_app --factory --port 8080
 ```
 
-Open the dashboard at http://localhost:8080/dashboard, then send a request
-(the demo keys are listed at the top of `config/gateway.yaml`):
+The dashboard is at http://localhost:8080/dashboard. Demo team keys are listed at the top of `config/gateway.yaml`.
 
 ```bash
 curl -s http://localhost:8080/v1/chat/completions -H "Authorization: Bearer gw-demo-alpha" -H "Content-Type: application/json" -d '{"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "Email John Smith at john.smith@acme.com about the invoice."}]}'
 ```
 
-The fake provider echoes what it received, so you'll see the original name and
-email restored. Add `-i` to see the gateway headers (`x-gateway-cache`,
-`x-gateway-cost-usd`, `x-gateway-redactions`...). Run the same command twice and
-the second one is a cache hit.
+The fake provider echoes its (redacted) input, so the response shows the original name and email restored. Add `-i` to see gateway headers such as `x-gateway-cache`, `x-gateway-cost-usd`, and `x-gateway-redactions`; repeating the request produces a cache hit.
 
-It works with the official OpenAI SDK too (`pip install openai`; the gateway
-itself doesn't need it). Streaming, `models.list()` and error classes like
-`RateLimitError` all behave as they do against OpenAI:
+The official OpenAI SDK works unchanged, including streaming, `models.list()`, and error classes such as `RateLimitError`:
 
 ```python
 from openai import OpenAI
@@ -134,49 +114,36 @@ client = OpenAI(base_url="http://localhost:8080/v1", api_key="gw-demo-alpha")
 client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": "hi"}])
 ```
 
-Things to try:
-- `"model": "flaky-model"`: its first provider fails 50% of the time, so you'll see retries and fallback (`x-gateway-provider: fake-backup`).
-- Key `gw-demo-tiny`: 5 requests/minute and a 500-token monthly budget, so you'll quickly get `429`s.
-- `"stream": true`: placeholders are restored even when split across chunks.
-- Header `Cache-Control: no-cache` skips the cache.
+Demo scenarios:
 
-**With Docker** (gateway + Jaeger trace viewer at http://localhost:16686):
+- `"model": "flaky-model"`: the first provider fails 50% of the time, showing retries and fallback (`x-gateway-provider: fake-backup`).
+- Key `gw-demo-tiny`: 5 requests/minute and a 500-token monthly budget, producing `429` responses.
+- `"stream": true`: placeholders are restored even when split across chunks.
+- Header `Cache-Control: no-cache` bypasses the cache.
+
+Generate a new team key and hash:
+
+```bash
+python scripts/hash_key.py
+```
+
+### Docker
 
 ```bash
 docker compose up --build
 ```
 
-**Run the tests:**
+Starts the gateway and Jaeger (trace viewer at http://localhost:16686).
 
-```bash
-python -m pytest
-```
+### Load testing
 
-**Load test** (with the gateway running):
+With the gateway running:
 
 ```bash
 python loadtest/loadtest.py --requests 2000 --concurrency 50
 ```
 
-**Benchmarks** (starts its own gateway processes on port 8091):
-
-```bash
-python loadtest/benchmark.py
-```
-
-## Load test and benchmarks
-
-All numbers below come from my laptop (Apple M4 Pro, 24 GB, Python 3.11). The
-load generator runs on the **same machine**, so treat them as relative, not
-absolute. Fake providers have fixed latency, so these measure the **gateway**,
-not an LLM.
-
-### Load test
-
-`loadtest/loadtest.py` sends a configurable mix of prompts: some repeated
-(cache-friendly), some with names/emails/phones (exercises Presidio), some
-streamed. It reports throughput, latency percentiles, status codes, cache hits
-and which provider served each request:
+The load generator mixes repeated prompts, prompts containing PII, and streamed requests, and reports throughput, latency percentiles, status codes, cache hits, and provider usage. Example:
 
 ```
 $ python loadtest/loadtest.py --requests 1000 --concurrency 32 --processes 4
@@ -188,96 +155,85 @@ cache    {'miss': 529, 'exact': 97, '-': 374}
 provider {'fake-primary': 529, 'cache': 97, '-': 374}
 ```
 
-The 374 `429`s are the rate limiter doing its job: the demo team `alpha`
-allows 600 requests/minute, so a 1,000-request burst gets its first ~600 (plus
-a little refill) and the rest are rejected. Use `--key` with your own team, or
-raise `requests_per_minute`, to load-test without limits. Use `--processes 4`
-or more above ~400 req/s, because one Python client process can't generate
-more load than that.
+The 429 responses come from the rate limiter: team `alpha` allows 600 requests/minute. Use `--key` with a team that has higher limits, or raise `requests_per_minute`, to test without limiting. Use `--processes 4` or more above ~400 req/s, the limit of a single Python client process.
 
-### Benchmark results
+Run the full benchmark suite (starts its own gateway processes on port 8091):
 
-`python loadtest/benchmark.py`: 5,000 requests per scenario, 64 concurrent
-connections across 8 client processes, a fresh gateway process per scenario.
+```bash
+python loadtest/benchmark.py
+```
 
-| Scenario | Throughput (req/s) | p50 ms | p95 ms | p99 ms | Success | Cache hits | p50 hit / miss ms |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| Gateway overhead (all features off) | 3,085 | 19.8 | 31.2 | 35.8 | 100% | 0% | - |
-| + PII redaction | 208 | 305.1 | 337.6 | 353.4 | 100% | 0% | - |
-| + PII redaction, 4 workers | 712 | 98.2 | 115.7 | 135.9 | 100% | 0% | - |
-| 50 ms provider, no cache | 341 | 74.1 | 390.9 | 414.2 | 100% | 0% | - |
-| 50 ms provider, cache on | 362 | 2.6 | 433.8 | 461.4 | 100% | 56% | 1.6 / 394.3 |
-| Flaky provider (30% failures) | 186 | 315.2 | 520.2 | 591.6 | 100% | 0% | - |
+## Running tests
 
-PII redaction cost vs message length (`python scripts/bench_pii.py`, one
-message, memo disabled):
+```bash
+python -m pytest
+```
 
-| Characters | p50 ms | p95 ms |
-|---:|---:|---:|
-| 126 | 4.6 | 5.4 |
-| 418 | 13.0 | 13.5 |
-| 1,513 | 43.1 | 44.5 |
-| 5,893 | 168.6 | 171.4 |
+53 offline tests:
 
-### What the numbers say
+| File | Coverage |
+|---|---|
+| `test_api.py` | End-to-end HTTP: PII, cache, limits, fallback, streaming, traces, and that no raw PII reaches the provider |
+| `test_pii.py` | Redaction, restoration, placeholders split across stream chunks |
+| `test_cache.py` | Exact and semantic hits, team isolation, number/placeholder guards, TTL, LRU |
+| `test_router.py` | Retries, fallback rules, streaming fallback, rate limiter |
 
-- **The gateway itself is cheap.** With features off, one worker serves ~3,000
-  req/s at ~20 ms p50 under 64 concurrent connections (ApacheBench measured
-  ~3,400 req/s for the same path). Compared with an LLM call that takes
-  hundreds of milliseconds, the overhead is negligible.
-- **PII redaction is the bottleneck.** Presidio/spaCy costs ~5 ms of CPU per
-  short message and grows linearly with length (~170 ms for a 6k-char RAG
-  prompt). It is CPU-bound, so one process tops out around 200 req/s of *new*
-  text. **More workers scale it almost linearly** (4 workers: 3.4×). The
-  memo makes repeated text (system prompts, chat history) nearly free.
-- **Provider latency doesn't limit throughput, CPU does.** Async I/O means
-  waiting 50 ms on a provider costs no CPU, so the 50 ms scenarios are limited
-  by Presidio, not the provider.
-- **Cache hits are ~250× faster than misses** (1.6 ms vs 394 ms p50 under load),
-  and they cost $0. The overall p95 doesn't improve because the misses still
-  queue behind Presidio; the win shows up in the hit latency and the bill.
-- **Fallback works: 100% success with 30% upstream failures.** The price is
-  tail latency (p99 ~590 ms) from retries and backoff.
+## Project structure
 
-### Bugs the load tests found
+```
+llm-gateway/
+├── gateway/
+│   ├── main.py              App factory and the /v1/chat/completions pipeline
+│   ├── config.py            Environment settings and YAML config models
+│   ├── schemas.py           OpenAI-compatible request/response models, token estimate
+│   ├── auth.py              Team API keys stored as SHA-256 hashes
+│   ├── ratelimit.py         Per-team token-bucket rate limiter
+│   ├── pii.py               Presidio redaction, placeholder restoration, streaming restorer
+│   ├── cache.py             Exact and semantic response cache (per team, LRU + TTL)
+│   ├── embeddings.py        Offline hashing embedder; optional sentence-transformers embedder
+│   ├── router.py            Fallback chain with retries, backoff, and per-attempt spans
+│   ├── pricing.py           Cost from token counts and the price table
+│   ├── store.py             SQLite request log, budget usage, dashboard aggregates
+│   ├── telemetry.py         OpenTelemetry setup and GenAI attributes
+│   ├── dashboard.py         Dashboard page and JSON stats API
+│   ├── static/dashboard.html  Dashboard (vanilla JS, inline SVG charts, no CDN)
+│   └── providers/
+│       ├── base.py          Provider interface and error classification
+│       ├── fake.py          Offline fake provider with configurable latency and failure rate
+│       ├── openai_compat.py OpenAI and OpenAI-compatible API adapter
+│       └── anthropic.py     Anthropic Messages API adapter
+├── config/gateway.yaml      Teams, providers, model fallback chains, prices
+├── tests/                   pytest suite (see Running tests)
+├── loadtest/
+│   ├── loadtest.py          Async multi-process load generator
+│   ├── benchmark.py         Runs and load-tests several gateway configurations
+│   ├── bench.yaml           Benchmark config (fixed-latency fake providers)
+│   └── results.md           Latest benchmark output
+├── scripts/
+│   ├── hash_key.py          Generates a team API key and its hash
+│   ├── eval_semantic_threshold.py  Labeled pairs for choosing the semantic-cache threshold
+│   └── bench_pii.py         Redaction latency vs message length
+├── Dockerfile               Non-root image with healthcheck
+├── docker-compose.yml       Gateway, Jaeger, optional load-test service
+├── DECISIONS.md             Design decision log
+├── requirements.txt         Pinned dependencies
+├── pytest.ini
+└── .env.example             Optional settings and provider keys (placeholders only)
+```
 
-The load tests were useful well beyond timing numbers:
+## Design decisions
 
-1. **Semantic cache false hits**: prompts differing only by a number ("fact
-   about 12" vs "13") were served each other's answers. Fixed by requiring
-   identical numbers (and placeholders) for a semantic match.
-2. **PII false positives**: decimals like `0.651593` were redacted as phone
-   numbers. Fixed with a plausibility filter.
-3. **Cache hits as slow as misses** (~180 ms): they were queueing behind
-   Presidio on a shared thread pool and lock. Fixed with a dedicated Presidio
-   thread and inline memo hits: 1.6 ms.
-4. **The benchmark was measuring itself**: a single Python client process maxed
-   out at ~350 req/s even against `/healthz`. Fixed with a multi-process load
-   generator, cross-checked with ApacheBench.
+See [DECISIONS.md](DECISIONS.md) for the full log. Highlights:
 
-## How it was built
+- **Cache on redacted text.** The cache never stores PII, and entries can be shared across users within a team.
+- **Semantic threshold chosen from labeled data.** `scripts/eval_semantic_threshold.py` selects 0.96; hard guards on numbers and placeholders cover cases where embeddings are known to be weak.
+- **spaCy `md` over `sm`.** The small model mis-bounded names in early testing.
+- **Token bucket rate limiting** allows short bursts while capping the average rate, with two numbers of state per team.
+- **Fake providers that echo their input** make tests deterministic and let them assert exactly what left the gateway.
 
-1. **Scaffolding**: conda env, `.gitignore`, config models (env settings plus YAML for teams/models/providers), OpenAI request/response schemas.
-2. **PII redaction**: tried Presidio with spaCy `sm`, switched to `md` after it mis-bounded names; wrote reversible numbered placeholders and a streaming restorer.
-3. **Providers and routing**: provider interface, fake provider, OpenAI and Anthropic adapters, a router with retries, backoff and a fallback chain, plus one GenAI-convention span per attempt.
-4. **Cache**: exact-match key on the redacted request, plus a semantic cache using an offline hashing embedder.
-5. **The endpoint**: auth → rate limit → budget → redact → cache → route → restore → record, with streaming and OpenAI-style errors.
-6. **Dashboard**: stats API over the SQLite log and a dependency-free HTML page.
-7. **Tests**: 50+ offline tests, including "no raw PII reached the provider".
-8. **Load testing found real bugs**: semantic-cache false hits on numbers and PII false positives on decimals (both fixed, see above).
-9. **Threshold tuning**: labeled pairs to pick the semantic threshold (0.96).
-10. **Docker Compose with Jaeger**; OTLP export verified against a local receiver.
-11. **Benchmarking and performance fixes**: found the load generator was the bottleneck and made it multi-process; memoized Presidio; moved it to a dedicated thread so cache hits stay fast.
-12. **This README and `DECISIONS.md`**.
+## Limitations and future work
 
-## Key concepts
-
-- **API gateway pattern**: one choke point for cross-cutting concerns (auth, limits, privacy, cost, observability), so every app doesn't reimplement them. Being OpenAI-compatible means switching an app over is just a `base_url` change.
-- **Reversible pseudonymization**: replace PII with placeholders, keep the mapping in memory for the request only, restore it in the output. The LLM provider never sees the real values, yet the user gets a natural answer. It also has to survive streaming, where a placeholder can be split across chunks.
-- **Caching LLM responses**: an exact cache is safe and cheap. A semantic cache trades correctness for hit rate, and its threshold is a precision/recall decision. I picked it with labeled data and added hard guards (numbers, placeholders) where embeddings are known to be weak. Caching the *redacted* text means the cache never stores PII and different users can share entries.
-- **Token bucket rate limiting**: allows bursts but caps the average rate; simple to implement with two numbers per team.
-- **Retries vs fallback**: retry transient errors (429/5xx/timeouts) with exponential backoff and jitter; fall back to another provider when retries run out; never retry a request the provider rejected as invalid (4xx). Streaming can only fall back before the first byte is sent.
-- **Observability with OpenTelemetry**: traces made of spans (parent/child, trace IDs). The GenAI semantic conventions standardize attribute names like `gen_ai.usage.input_tokens`, so tools can chart token usage across vendors. Prompt content is kept out of traces for privacy.
-- **Async I/O vs CPU-bound work**: the event loop handles thousands of waiting HTTP calls, but Presidio/spaCy is CPU-bound and runs in a thread. That makes it the throughput limit per process, so you scale with more worker processes (see benchmarks).
-- **Per-process state**: rate limits, cache and budget counters live in memory, which is fine for one process. With multiple replicas they would move to Redis and a shared database.
-- **Testing with fakes**: a fake provider that echoes its input makes the tests deterministic and offline, and lets them assert exactly what left the gateway.
+- **Single node.** Rate-limit buckets, cache, and budget counters are per process; with several workers, effective limits multiply by the worker count. Multi-node deployment needs Redis for limits and cache and a shared database.
+- **Real providers have not been called.** The OpenAI and Anthropic adapters follow the public APIs but are untested against live endpoints.
+- **Docker Compose has not been run.** The Jaeger image tag and ports follow Jaeger's getting-started documentation; OTLP export was verified against a local receiver.
+- Token counts from fake providers are estimates (~4 characters per token).
