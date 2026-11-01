@@ -23,3 +23,7 @@ opentelemetry-exporter-otlp-proto-http==1.45.1
 # Tests
 pytest==9.1.1
 pytest-asyncio==1.4.0
+
+# Security floors for transitive dependencies (known vulnerabilities below these versions)
+certifi>=2026.10.18
+filelock>=4.2.1

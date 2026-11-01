@@ -7,7 +7,7 @@ services:
   gateway:
     build: .
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"   # localhost only: the demo keys are public
     env_file:
       - path: .env        # optional: real provider keys
         required: false
@@ -22,8 +22,8 @@ services:
   jaeger:
     image: cr.jaegertracing.io/jaegertracing/jaeger:2.21.0   # all-in-one, in-memory storage
     ports:
-      - "16686:16686"   # UI
-      - "4318:4318"     # OTLP/HTTP, so a gateway running outside Docker can send traces too
+      - "127.0.0.1:16686:16686"   # UI
+      - "127.0.0.1:4318:4318"     # OTLP/HTTP, so a gateway running outside Docker can send traces too
 
   loadtest:
     build: .

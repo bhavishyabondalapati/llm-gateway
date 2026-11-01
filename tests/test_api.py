@@ -192,3 +192,21 @@ def test_dashboard_stats(client):
     assert t["redactions"] == 4 and t["saved_usd"] > 0
     assert {e["entity_type"] for e in stats["redactions_by_entity"]} == {"PERSON", "EMAIL_ADDRESS"}
     assert client.get("/dashboard").status_code == 200
+
+
+def test_max_tokens_is_capped(client):
+    r = client.post("/v1/chat/completions", headers=AUTH_A,
+                    json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 10_000_000})
+    assert r.status_code == 400
+
+
+def test_warns_when_real_providers_meet_demo_keys(caplog):
+    from types import SimpleNamespace as NS
+
+    from gateway.auth import hash_key
+    from gateway.main import warn_if_exposed_demo_setup
+
+    config = NS(providers={"openai": NS(type="openai")},
+                teams=[NS(name="alpha", api_key_sha256=hash_key("gw-demo-alpha"))])
+    warn_if_exposed_demo_setup(config, NS(dashboard_token=""), {"openai": object()})
+    assert "demo keys" in caplog.text and "DASHBOARD_TOKEN" in caplog.text

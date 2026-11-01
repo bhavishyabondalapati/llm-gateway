@@ -26,10 +26,10 @@ class ChatCompletionRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     model: str
-    messages: list[ChatMessage] = Field(min_length=1)
+    messages: list[ChatMessage] = Field(min_length=1, max_length=500)
     temperature: float | None = None
     top_p: float | None = None
-    max_tokens: int | None = None
+    max_tokens: int | None = Field(default=None, ge=1, le=32_768)  # caps what one request can cost
     stream: bool = False
     user: str | None = None
 

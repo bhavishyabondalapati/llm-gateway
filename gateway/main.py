@@ -66,6 +66,28 @@ def error_response(status: int, message: str, type_: str, code: str | None = Non
     )
 
 
+# Hashes of the demo keys printed in the README (gw-demo-alpha, gw-demo-beta, gw-demo-tiny).
+DEMO_KEY_HASHES = {
+    "da85c4038e2e5f3aebd384ca231eb74e2ab5a472a932b17ab5c307cfa552b6ce",
+    "083bd6627524ff4ab186a1d5681eeeb91e67847f20283c8d7add150223dad852",
+    "d8c3933e8873279365a5baedf1eaf64ca8ac713dcd4d69f6273b9f9760f443d8",
+}
+
+
+def warn_if_exposed_demo_setup(config: GatewayConfig, settings: Settings, providers: dict) -> None:
+    """Real provider keys plus public demo keys means anyone who can reach the port can spend real money."""
+    real = [name for name, p in config.providers.items() if name in providers and p.type != "fake"]
+    if not real:
+        return
+    demo_teams = [t.name for t in config.teams if t.api_key_sha256 in DEMO_KEY_HASHES]
+    if demo_teams:
+        log.warning("real providers %s are enabled while demo keys (teams %s) are accepted: "
+                    "keep the gateway on localhost or create private keys with scripts/hash_key.py --new",
+                    ", ".join(real), ", ".join(demo_teams))
+    if not settings.dashboard_token:
+        log.warning("real providers are enabled and DASHBOARD_TOKEN is empty: the dashboard is open to anyone who can reach it")
+
+
 def create_app(
     settings: Settings | None = None,
     config: GatewayConfig | None = None,
@@ -77,6 +99,7 @@ def create_app(
     config = config or load_gateway_config(settings.gateway_config)
     tracer_provider, tracer = tm.setup_tracing(settings, span_exporter)
     providers = build_providers(config, settings)
+    warn_if_exposed_demo_setup(config, settings, providers)
 
     if settings.pii_enabled and redactor is None:
         redactor = PIIRedactor(score_threshold=settings.pii_score_threshold, spacy_model=settings.spacy_model)

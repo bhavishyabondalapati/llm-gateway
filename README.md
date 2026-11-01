@@ -216,6 +216,7 @@ llm-gateway/
 ├── Dockerfile               Non-root image with healthcheck
 ├── docker-compose.yml       Gateway, Jaeger, optional load-test service
 ├── DECISIONS.md             Design decision log
+├── LICENSE                  MIT license
 ├── requirements.txt         Pinned dependencies
 ├── pytest.ini
 └── .env.example             Optional settings and provider keys (placeholders only)
@@ -231,9 +232,22 @@ See [DECISIONS.md](DECISIONS.md) for the full log. Highlights:
 - **Token bucket rate limiting** allows short bursts while capping the average rate, with two numbers of state per team.
 - **Fake providers that echo their input** make tests deterministic and let them assert exactly what left the gateway.
 
+## Before exposing the gateway
+
+The demo keys above are public, so they are only safe on your own machine.
+
+- `docker compose` publishes ports on `127.0.0.1` only. Keep it that way unless the gateway has private keys.
+- Before anyone else can reach it: replace the demo teams in `config/gateway.yaml` with keys from `python scripts/hash_key.py --new`, and set `DASHBOARD_TOKEN`.
+- The gateway logs a warning at startup when real providers are enabled while demo keys or an open dashboard are still configured.
+- Requests are capped at 500 messages and `max_tokens` ≤ 32,768, on top of the per-team rate limits and monthly token budgets.
+
 ## Limitations and future work
 
 - **Single node.** Rate-limit buckets, cache, and budget counters are per process; with several workers, effective limits multiply by the worker count. Multi-node deployment needs Redis for limits and cache and a shared database.
 - **Real providers have not been called.** The OpenAI and Anthropic adapters follow the public APIs but are untested against live endpoints.
 - **Docker Compose has not been run.** The Jaeger image tag and ports follow Jaeger's getting-started documentation; OTLP export was verified against a local receiver.
 - Token counts from fake providers are estimates (~4 characters per token).
+
+## License
+
+Code is released under the MIT License; see [LICENSE](LICENSE).
